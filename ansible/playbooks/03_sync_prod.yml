@@ -1,0 +1,76 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════════
+# BOUTON 3 SEMAPHORE : Synchro Prod
+# ═══════════════════════════════════════════════════════════════════════════════
+# Prérequis : Playbooks 01 + 02 (Synchro + Deploy Hors-Prod) validés par QA.
+# Action    : Ordonne à Prod de fetch/pull le code depuis Hors-Prod (via SSH).
+#             La Prod ne connaît pas GitLab — elle tire depuis le Git de Hors-Prod.
+# Flux      : Orchestrateur --SSH(Clé B)--> Prod --git fetch(Clé C)--> Hors-Prod
+# ═══════════════════════════════════════════════════════════════════════════════
+
+- name: Synchronisation Prod depuis Hors-Prod
+  hosts: prod
+  gather_facts: false
+  become: false
+
+  vars:
+    sync_branch: "{{ git_branch | default('main') }}"
+    sync_tag: "{{ git_tag | default('') }}"
+
+  pre_tasks:
+    - name: Vérifier la connectivité vers Prod
+      ansible.builtin.ping:
+
+    - name: Afficher les paramètres de synchronisation
+      ansible.builtin.debug:
+        msg:
+          - "Serveur cible  : {{ inventory_hostname }}"
+          - "Répertoire app : {{ app_root }}"
+          - "Remote Git     : {{ git_remote_name }} -> {{ git_remote_url }}"
+          - "Source         : Hors-Prod (git over SSH)"
+          - "Branche/Tag    : {{ sync_tag if sync_tag else sync_branch }}"
+
+    - name: Tester la connectivité SSH de Prod vers Hors-Prod (git)
+      ansible.builtin.command:
+        cmd: >
+          ssh -i {{ git_ssh_key_path }}
+              -o StrictHostKeyChecking=accept-new
+              -o BatchMode=yes
+              deploy@hors-prod-git
+              "git-upload-pack --stateless-rpc --advertise-refs /opt/apps/{{ app_name }}"
+      register: ssh_git_test
+      changed_when: false
+      failed_when: false
+
+    - name: Avertir si la connectivité git SSH est indisponible
+      ansible.builtin.fail:
+        msg: >
+          Impossible de contacter Hors-Prod depuis Prod via SSH git.
+          Vérifiez la Clé C et la config SSH sur Prod.
+          Détail : {{ ssh_git_test.stderr }}
+      when: ssh_git_test.rc != 0
+
+  tasks:
+    - name: Synchronisation Git depuis Hors-Prod (rôle git_sync)
+      ansible.builtin.include_role:
+        name: git_sync
+      vars:
+        target_host_type: prod
+
+  post_tasks:
+    - name: Récupérer le commit courant après synchronisation
+      ansible.builtin.command:
+        cmd: git log --oneline -1
+        chdir: "{{ app_root }}"
+      register: current_commit
+      changed_when: false
+
+    - name: Afficher le résumé de synchronisation
+      ansible.builtin.debug:
+        msg:
+          - "================================================"
+          - "SYNCHRO PROD TERMINEE"
+          - "Commit deploye : {{ current_commit.stdout }}"
+          - "Serveur        : {{ inventory_hostname }}"
+          - "Source         : Hors-Prod ({{ git_remote_name }})"
+          - "================================================"

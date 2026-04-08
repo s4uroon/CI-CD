@@ -1,0 +1,60 @@
+#!/bin/bash
+# ═══════════════════════════════════════════════════════════════════════════════
+# Script de déploiement généré par Ansible
+# Application : {{ app_name }}
+# Environnement : {{ deploy_env }}
+# Généré le : {{ ansible_date_time.iso8601 | default('N/A') }}
+# ═══════════════════════════════════════════════════════════════════════════════
+
+set -euo pipefail
+
+APP_DIR="{{ app_root }}"
+APP_USER="{{ app_user }}"
+APP_ENV="{{ deploy_env }}"
+LOG_FILE="{{ log_dir }}/deploy.log"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$APP_ENV] $1" | tee -a "$LOG_FILE"
+}
+
+log "=== Démarrage du déploiement ==="
+log "Commit : $(git -C $APP_DIR log --oneline -1)"
+
+{% if app_type == "php" %}
+# ─── PHP / Composer ────────────────────────────────────────────────────────────
+log "Installation des dépendances Composer..."
+cd "$APP_DIR"
+{{ composer_path }} install {{ composer_args }} >> "$LOG_FILE" 2>&1
+
+{% if run_migrations %}
+log "Exécution des migrations..."
+php artisan migrate --force >> "$LOG_FILE" 2>&1
+{% endif %}
+
+log "Vidage et régénération du cache..."
+php artisan config:cache  >> "$LOG_FILE" 2>&1
+php artisan route:cache   >> "$LOG_FILE" 2>&1
+php artisan view:cache    >> "$LOG_FILE" 2>&1
+
+{% endif %}
+
+{% if app_type == "python" %}
+# ─── Python / pip ──────────────────────────────────────────────────────────────
+log "Activation du virtualenv et installation des dépendances..."
+source "{{ python_venv_path }}/bin/activate"
+pip install -r "{{ requirements_file }}" --quiet >> "$LOG_FILE" 2>&1
+
+{% if run_migrations %}
+log "Exécution des migrations Django..."
+python manage.py migrate >> "$LOG_FILE" 2>&1
+{% endif %}
+
+log "Collecte des fichiers statiques..."
+python manage.py collectstatic --noinput >> "$LOG_FILE" 2>&1
+
+{% endif %}
+
+log "Redémarrage du service {{ app_service_name }}..."
+systemctl restart "{{ app_service_name }}" >> "$LOG_FILE" 2>&1
+
+log "=== Déploiement terminé avec succès ==="

@@ -1,0 +1,74 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════════
+# BOUTON 2 SEMAPHORE : Déployer Hors-Prod
+# ═══════════════════════════════════════════════════════════════════════════════
+# Prérequis : Playbook 01 (Synchro Hors-Prod) doit avoir été exécuté.
+# Action    : Exécute les scripts de déploiement sur Hors-Prod
+#             (dépendances, migrations, reload service).
+# Flux      : Orchestrateur --SSH(Clé A)--> Hors-Prod
+# ═══════════════════════════════════════════════════════════════════════════════
+
+- name: Déploiement applicatif sur Hors-Prod
+  hosts: hors_prod
+  gather_facts: true
+  become: false
+
+  pre_tasks:
+    - name: Vérifier la connectivité vers Hors-Prod
+      ansible.builtin.ping:
+
+    - name: Récupérer le commit actuellement en place
+      ansible.builtin.command:
+        cmd: git log --oneline -1
+        chdir: "{{ app_root }}"
+      register: commit_before_deploy
+      changed_when: false
+
+    - name: Afficher le commit à déployer
+      ansible.builtin.debug:
+        msg:
+          - "Déploiement Hors-Prod"
+          - "Commit : {{ commit_before_deploy.stdout }}"
+          - "App    : {{ app_root }}"
+
+    - name: Créer un tag de sauvegarde avant déploiement
+      ansible.builtin.command:
+        cmd: >
+          git tag -f "backup/hp-pre-deploy-{{ ansible_date_time.date }}-{{ ansible_date_time.time | replace(':', '-') }}"
+        chdir: "{{ app_root }}"
+      changed_when: true
+
+  tasks:
+    - name: Déploiement applicatif (rôle deploy)
+      ansible.builtin.include_role:
+        name: deploy
+      vars:
+        deploy_env: "{{ app_env | default('recette') }}"
+
+  post_tasks:
+    - name: Vérifier que le service est actif
+      ansible.builtin.systemd:
+        name: "{{ app_service_name }}"
+      register: service_status
+      become: true
+      become_user: root
+
+    - name: Afficher le statut du service
+      ansible.builtin.debug:
+        msg:
+          - "Service {{ app_service_name }} : {{ service_status.status.ActiveState }}"
+
+    - name: Échouer si le service n'est pas actif
+      ansible.builtin.fail:
+        msg: "Le service {{ app_service_name }} n'est pas actif après déploiement !"
+      when: service_status.status.ActiveState != "active"
+
+    - name: Afficher le résumé du déploiement
+      ansible.builtin.debug:
+        msg:
+          - "================================================"
+          - "DEPLOIEMENT HORS-PROD TERMINE"
+          - "Commit : {{ commit_before_deploy.stdout }}"
+          - "Status : OK - Service actif"
+          - "Env    : {{ app_env | default('recette') }}"
+          - "================================================"

@@ -1,0 +1,35 @@
+---
+# Variables communes à tous les environnements
+# Surchargeables dans hors_prod.yml et prod.yml
+
+# ─── Application ───────────────────────────────────────────────────────────────
+app_name: myapp
+app_root: "/opt/apps/{{ app_name }}"
+app_user: deploy
+app_group: deploy
+app_service_name: "{{ app_name }}"     # Nom du service systemd
+
+# Type d'application : php | python
+app_type: php                          # Adapter selon votre stack
+
+# ─── Git ───────────────────────────────────────────────────────────────────────
+git_branch: main                       # Branche déployée par défaut
+git_tag: ""                            # Si défini, prend priorité sur git_branch
+git_depth: 0                           # 0 = historique complet (requis pour rollback)
+
+# ─── PHP (si app_type == php) ──────────────────────────────────────────────────
+php_version: "8.2"
+composer_path: /usr/local/bin/composer
+php_fpm_service: "php{{ php_version }}-fpm"
+
+# ─── Python (si app_type == python) ────────────────────────────────────────────
+python_venv_path: "{{ app_root }}/.venv"
+requirements_file: "{{ app_root }}/requirements.txt"
+
+# ─── Base de données ───────────────────────────────────────────────────────────
+run_migrations: true
+db_backup_before_migration: true
+db_backup_dir: /opt/backups
+
+# ─── Logging ───────────────────────────────────────────────────────────────────
+log_dir: /var/log/apps/{{ app_name }}

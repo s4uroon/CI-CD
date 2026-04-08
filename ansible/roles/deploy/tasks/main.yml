@@ -1,0 +1,50 @@
+---
+# ─── Rôle : deploy ────────────────────────────────────────────────────────────
+# Exécute les étapes de déploiement applicatif.
+# Appelé par les playbooks 02, 04 et 05 (deploy HP, deploy Prod, rollback).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─── Installation des dépendances ─────────────────────────────────────────────
+
+- name: Installer les dépendances (PHP)
+  ansible.builtin.include_tasks: install_deps.yml
+  when: app_type == "php"
+
+- name: Installer les dépendances (Python)
+  ansible.builtin.include_tasks: install_deps_python.yml
+  when: app_type == "python"
+
+# ─── Migrations de base de données ────────────────────────────────────────────
+
+- name: Exécuter les migrations
+  ansible.builtin.include_tasks: run_migrations.yml
+  when: run_migrations | default(true)
+
+# ─── Cache / Assets ────────────────────────────────────────────────────────────
+
+- name: Vider et régénérer le cache (PHP)
+  ansible.builtin.command:
+    cmd: "{{ cache_clear_command_php }}"
+    chdir: "{{ app_root }}"
+  when:
+    - app_type == "php"
+    - clear_cache | default(true)
+  changed_when: true
+
+# ─── Redémarrage du service ────────────────────────────────────────────────────
+
+- name: Recharger le service applicatif (systemd)
+  ansible.builtin.systemd:
+    name: "{{ app_service_name }}"
+    state: restarted
+    daemon_reload: true
+  become: true
+  become_user: root
+
+- name: Recharger PHP-FPM si nécessaire (PHP)
+  ansible.builtin.systemd:
+    name: "{{ php_fpm_service }}"
+    state: reloaded
+  become: true
+  become_user: root
+  when: app_type == "php"

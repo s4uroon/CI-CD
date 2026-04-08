@@ -1,0 +1,28 @@
+---
+# ─── Tâche : run_migrations ───────────────────────────────────────────────────
+
+- name: Exécuter les migrations (PHP/Laravel)
+  ansible.builtin.command:
+    cmd: "{{ migration_command_php }}"
+    chdir: "{{ app_root }}"
+  when: app_type == "php"
+  register: migration_php_result
+  changed_when: "'Nothing to migrate' not in migration_php_result.stdout"
+
+- name: Afficher le résultat des migrations PHP
+  ansible.builtin.debug:
+    var: migration_php_result.stdout_lines
+  when: app_type == "php"
+
+- name: Exécuter les migrations (Python/Django)
+  ansible.builtin.command:
+    cmd: "{{ python_venv_path }}/bin/python {{ migration_command_python }}"
+    chdir: "{{ app_root }}"
+  when: app_type == "python"
+  register: migration_python_result
+  changed_when: "'No migrations to apply' not in migration_python_result.stdout"
+
+- name: Afficher le résultat des migrations Python
+  ansible.builtin.debug:
+    var: migration_python_result.stdout_lines
+  when: app_type == "python"
