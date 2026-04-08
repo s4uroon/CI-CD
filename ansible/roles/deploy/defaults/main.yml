@@ -1,0 +1,36 @@
+---
+# Valeurs par défaut du rôle deploy
+
+# Type d'application : php | python
+app_type: php
+
+# Environnement cible
+deploy_env: recette
+
+# Répertoire racine de l'application
+app_root: "/opt/apps/{{ app_name | default('myapp') }}"
+app_user: deploy
+app_group: deploy
+
+# Nom du service systemd
+app_service_name: "{{ app_name | default('myapp') }}"
+
+# ─── PHP ───────────────────────────────────────────────────────────────────────
+php_version: "8.2"
+composer_path: /usr/local/bin/composer
+composer_args: "--no-dev --optimize-autoloader --no-interaction"
+php_fpm_service: "php{{ php_version }}-fpm"
+
+# ─── Python ────────────────────────────────────────────────────────────────────
+python_venv_path: "{{ app_root }}/.venv"
+requirements_file: "{{ app_root }}/requirements.txt"
+pip_args: "--no-deps"
+
+# ─── Migrations ────────────────────────────────────────────────────────────────
+run_migrations: true
+migration_command_php: "php artisan migrate --force"
+migration_command_python: "python manage.py migrate"
+
+# ─── Cache / Assets ────────────────────────────────────────────────────────────
+clear_cache: true
+cache_clear_command_php: "php artisan config:cache && php artisan route:cache && php artisan view:cache"

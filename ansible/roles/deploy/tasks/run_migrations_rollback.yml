@@ -1,0 +1,29 @@
+---
+# ─── Tâche : run_migrations_rollback ──────────────────────────────────────────
+# Appelée uniquement lors d'un rollback (playbook 05).
+# Cherche et exécute les scripts de rollback de migration s'ils existent.
+
+- name: Vérifier l'existence d'un script de rollback de migration
+  ansible.builtin.stat:
+    path: "{{ app_root }}/migrations/rollback.sh"
+  register: rollback_script
+
+- name: Exécuter le script de rollback de migration
+  ansible.builtin.command:
+    cmd: "bash migrations/rollback.sh {{ target_version }}"
+    chdir: "{{ app_root }}"
+  when: rollback_script.stat.exists
+  register: rollback_migration_result
+
+- name: Afficher le résultat du rollback migration
+  ansible.builtin.debug:
+    var: rollback_migration_result.stdout_lines
+  when: rollback_script.stat.exists
+
+- name: Avertir si aucun script de rollback migration n'est défini
+  ansible.builtin.debug:
+    msg: >
+      Aucun script de rollback de migration trouvé (migrations/rollback.sh).
+      Si des migrations irréversibles ont été appliquées, une restauration
+      manuelle de la base de données peut être nécessaire.
+  when: not rollback_script.stat.exists

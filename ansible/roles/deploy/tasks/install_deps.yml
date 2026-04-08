@@ -1,0 +1,23 @@
+---
+# ─── Tâche : install_deps (PHP/Composer) ──────────────────────────────────────
+
+- name: Vérifier que composer.json existe
+  ansible.builtin.stat:
+    path: "{{ app_root }}/composer.json"
+  register: composer_json
+
+- name: Installer les dépendances PHP via Composer
+  ansible.builtin.command:
+    cmd: "{{ composer_path }} install {{ composer_args }}"
+    chdir: "{{ app_root }}"
+  environment:
+    COMPOSER_HOME: "/home/{{ app_user }}/.composer"
+    HOME: "/home/{{ app_user }}"
+  when: composer_json.stat.exists
+  register: composer_result
+  changed_when: "'Nothing to install' not in composer_result.stdout"
+
+- name: Afficher le résultat Composer
+  ansible.builtin.debug:
+    var: composer_result.stdout_lines
+  when: composer_json.stat.exists

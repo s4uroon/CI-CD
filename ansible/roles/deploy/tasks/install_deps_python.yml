@@ -1,0 +1,26 @@
+---
+# ─── Tâche : install_deps_python ──────────────────────────────────────────────
+
+- name: Créer le virtualenv Python si inexistant
+  ansible.builtin.command:
+    cmd: "python3 -m venv {{ python_venv_path }}"
+    creates: "{{ python_venv_path }}/bin/python"
+
+- name: Vérifier que requirements.txt existe
+  ansible.builtin.stat:
+    path: "{{ requirements_file }}"
+  register: req_file
+
+- name: Installer les dépendances Python via pip
+  ansible.builtin.pip:
+    requirements: "{{ requirements_file }}"
+    virtualenv: "{{ python_venv_path }}"
+    extra_args: "{{ pip_args | default('') }}"
+    state: present
+  when: req_file.stat.exists
+  register: pip_result
+
+- name: Afficher le résultat pip
+  ansible.builtin.debug:
+    var: pip_result.stdout_lines
+  when: req_file.stat.exists

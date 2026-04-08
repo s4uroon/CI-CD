@@ -1,0 +1,25 @@
+---
+# Variables spécifiques au serveur Hors-Production
+
+# ─── Git : Hors-Prod tire depuis GitLab ────────────────────────────────────────
+git_remote_name: gitlab
+git_remote_url: "git@gitlab:mygroup/myapp.git"
+# Note : "gitlab" est le host alias défini dans ~/.ssh/config sur Hors-Prod
+# qui pointe vers gitlab.company.com avec la clé D (id_hp_gitlab)
+
+# Branche à déployer en recette
+git_branch: main
+
+# ─── SSH config pour git (utilisé dans le rôle git_sync) ──────────────────────
+git_ssh_key_path: "/home/{{ app_user }}/.ssh/id_hp_gitlab"
+
+# ─── Application ───────────────────────────────────────────────────────────────
+# Surcharge de l'environnement applicatif pour Hors-Prod
+app_env: recette
+app_debug: true
+
+# ─── Base de données Hors-Prod ─────────────────────────────────────────────────
+db_host: "localhost"
+db_name: "{{ app_name }}_recette"
+db_user: "{{ app_name }}_user"
+# db_password : à définir dans le Vault Ansible ou les secrets Semaphore

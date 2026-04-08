@@ -1,0 +1,31 @@
+---
+# Valeurs par défaut du rôle git_sync
+# Ces valeurs sont surchargées par group_vars/hors_prod.yml et group_vars/prod.yml
+
+# Type de cible : hors_prod | prod
+target_host_type: hors_prod
+
+# Répertoire de l'application
+app_root: "/opt/apps/{{ app_name | default('myapp') }}"
+
+# Branche à synchroniser (surchargée depuis group_vars)
+git_branch: main
+
+# Tag à déployer (priorité sur git_branch si défini)
+git_tag: ""
+
+# Nom du remote Git (gitlab pour HP, staging pour Prod)
+git_remote_name: gitlab
+
+# URL du remote Git
+git_remote_url: ""
+
+# Chemin vers la clé SSH pour les opérations git
+git_ssh_key_path: "~/.ssh/id_hp_gitlab"
+
+# Propriétaire du répertoire applicatif
+app_user: deploy
+app_group: deploy
+
+# Cloner si le dépôt n'existe pas encore
+git_clone_if_missing: true
