@@ -1,35 +1,44 @@
 ---
 # ═══════════════════════════════════════════════════════════════════════════════
-# BOUTON 2 SEMAPHORE : Déployer Hors-Prod
+# BOUTON 2 SEMAPHORE : Déployer HP
 # ═══════════════════════════════════════════════════════════════════════════════
-# Prérequis : Playbook 01 (Synchro Hors-Prod) doit avoir été exécuté.
-# Action    : Exécute les scripts de déploiement sur Hors-Prod
-#             (dépendances, migrations, reload service).
-# Flux      : Orchestrateur --SSH(Clé A)--> Hors-Prod
+# Cible  : Serveur App Hors-Prod (working tree)
+# Action : Le serveur App HP tire le code depuis le Git HP (git fetch + checkout)
+#          puis exécute les scripts de déploiement.
+#
+# Prérequis : Bouton 1 (Synchro Git HP) doit avoir été exécuté.
+#
+# Flux   :
+#   Opérateur
+#     --> [Semaphore] clique "Deployer HP"
+#     --> Orchestrateur --SSH(Clé B)--> App HP Server
+#     --> App HP Server --git fetch(Clé G)--> Git HP Server (bare)
+#     --> git checkout + install deps + migrations + reload service
 # ═══════════════════════════════════════════════════════════════════════════════
 
 - name: Déploiement applicatif sur Hors-Prod
-  hosts: hors_prod
+  hosts: app_hp
   gather_facts: true
   become: false
 
   pre_tasks:
-    - name: Vérifier la connectivité vers Hors-Prod
+    - name: Vérifier la connectivité vers App HP
       ansible.builtin.ping:
 
     - name: Récupérer le commit actuellement en place
       ansible.builtin.command:
         cmd: git log --oneline -1
         chdir: "{{ app_root }}"
-      register: commit_before_deploy
+      register: commit_before
       changed_when: false
+      failed_when: false
 
-    - name: Afficher le commit à déployer
+    - name: Afficher le commit actuel
       ansible.builtin.debug:
         msg:
           - "Déploiement Hors-Prod"
-          - "Commit : {{ commit_before_deploy.stdout }}"
-          - "App    : {{ app_root }}"
+          - "Commit actuel : {{ commit_before.stdout | default('dépôt vide - premier déploiement') }}"
+          - "Source git    : {{ git_remote_url }}"
 
     - name: Créer un tag de sauvegarde avant déploiement
       ansible.builtin.command:
@@ -37,9 +46,16 @@
           git tag -f "backup/hp-pre-deploy-{{ ansible_date_time.date }}-{{ ansible_date_time.time | replace(':', '-') }}"
         chdir: "{{ app_root }}"
       changed_when: true
+      failed_when: false   # Pas bloquant si c'est le premier déploiement
 
   tasks:
-    - name: Déploiement applicatif (rôle deploy)
+    - name: Synchronisation depuis Git HP (fetch + checkout)
+      ansible.builtin.include_role:
+        name: git_sync
+      vars:
+        git_repo_type: working
+
+    - name: Déploiement applicatif (install deps, migrations, reload)
       ansible.builtin.include_role:
         name: deploy
       vars:
@@ -53,22 +69,25 @@
       become: true
       become_user: root
 
-    - name: Afficher le statut du service
-      ansible.builtin.debug:
-        msg:
-          - "Service {{ app_service_name }} : {{ service_status.status.ActiveState }}"
-
     - name: Échouer si le service n'est pas actif
       ansible.builtin.fail:
-        msg: "Le service {{ app_service_name }} n'est pas actif après déploiement !"
+        msg: "Le service {{ app_service_name }} n'est pas actif après déploiement HP !"
       when: service_status.status.ActiveState != "active"
 
-    - name: Afficher le résumé du déploiement
+    - name: Récupérer le commit déployé
+      ansible.builtin.command:
+        cmd: git log --oneline -1
+        chdir: "{{ app_root }}"
+      register: commit_after
+      changed_when: false
+
+    - name: Afficher le résumé du déploiement HP
       ansible.builtin.debug:
         msg:
           - "================================================"
           - "DEPLOIEMENT HORS-PROD TERMINE"
-          - "Commit : {{ commit_before_deploy.stdout }}"
-          - "Status : OK - Service actif"
-          - "Env    : {{ app_env | default('recette') }}"
+          - "Commit deploye : {{ commit_after.stdout }}"
+          - "Service        : {{ app_service_name }} -> ACTIF"
+          - "Env            : {{ app_env | default('recette') }}"
           - "================================================"
+          - "Prochaine etape : Validation QA, puis Bouton 3 - Synchro Git Prod"

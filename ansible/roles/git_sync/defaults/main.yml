@@ -1,31 +1,32 @@
 ---
 # Valeurs par défaut du rôle git_sync
-# Ces valeurs sont surchargées par group_vars/hors_prod.yml et group_vars/prod.yml
 
-# Type de cible : hors_prod | prod
-target_host_type: hors_prod
+# Type de dépôt sur le serveur cible :
+#   bare    → dépôt nu (serveurs Git HP et Git Prod), pas de working tree
+#   working → dépôt avec working tree (serveurs App HP et App Prod)
+git_repo_type: bare
 
-# Répertoire de l'application
+# ─── Chemins ────────────────────────────────────────────────────────────────────
+# Utilisé si git_repo_type == bare
+git_bare_root: "/opt/git/{{ app_name | default('myapp') }}.git"
+
+# Utilisé si git_repo_type == working
 app_root: "/opt/apps/{{ app_name | default('myapp') }}"
 
-# Branche à synchroniser (surchargée depuis group_vars)
-git_branch: main
-
-# Tag à déployer (priorité sur git_branch si défini)
-git_tag: ""
-
-# Nom du remote Git (gitlab pour HP, staging pour Prod)
-git_remote_name: gitlab
-
-# URL du remote Git
+# ─── Remote Git ─────────────────────────────────────────────────────────────────
+git_remote_name: origin
 git_remote_url: ""
 
-# Chemin vers la clé SSH pour les opérations git
-git_ssh_key_path: "~/.ssh/id_hp_gitlab"
+# Clé SSH que le serveur CIBLE utilise pour se connecter à sa source
+git_ssh_key_path: "~/.ssh/id_git"
 
-# Propriétaire du répertoire applicatif
+# ─── Branche / Tag ──────────────────────────────────────────────────────────────
+git_branch: main
+git_tag: ""    # Si défini, prend priorité sur git_branch (working tree uniquement)
+
+# ─── Propriétaire ───────────────────────────────────────────────────────────────
 app_user: deploy
 app_group: deploy
 
-# Cloner si le dépôt n'existe pas encore
-git_clone_if_missing: true
+# Créer le dépôt s'il n'existe pas encore
+git_init_if_missing: true

@@ -1,13 +1,23 @@
 # Gestion des Clés SSH
 
-## Vue d'ensemble des 4 paires de clés
+## Vue d'ensemble des 8 paires de clés
 
-| Paire | Identifiant       | Source          | Destination   | Usage                                     |
-|-------|-------------------|-----------------|---------------|-------------------------------------------|
-| A     | `id_orch_hp`      | Orchestrateur   | Hors-Prod     | Ansible execute playbooks 1 & 2 sur HP    |
-| B     | `id_orch_prod`    | Orchestrateur   | Prod          | Ansible execute playbooks 3, 4 & 5 sur Prod |
-| C     | `id_prod_hp_git`  | Prod            | Hors-Prod     | Git fetch : Prod tire le code depuis HP   |
-| D     | `id_hp_gitlab`    | Hors-Prod       | GitLab        | Git fetch : HP tire le code depuis GitLab |
+L'architecture à 6 serveurs nécessite 8 paires de clés SSH distinctes,
+réparties en deux catégories :
+
+**Clés Ansible (A, B, C, D)** — l'Orchestrateur pilote les serveurs cibles.
+**Clés Git (E, F, G, H)** — les serveurs tirent le code depuis leur source.
+
+| Clé | Source         | Destination    | Usage                                    | Fichier clé privée (sur la source)      |
+|-----|----------------|----------------|------------------------------------------|-----------------------------------------|
+| A   | Orchestrateur  | Git HP         | Ansible pilote la synchro bare           | `~/.ssh/id_orch_git_hp`                |
+| B   | Orchestrateur  | App HP         | Ansible pilote le déploiement HP         | `~/.ssh/id_orch_app_hp`                |
+| C   | Orchestrateur  | Git Prod       | Ansible pilote la synchro bare Prod      | `~/.ssh/id_orch_git_prod`              |
+| D   | Orchestrateur  | App Prod       | Ansible pilote le déploiement Prod       | `~/.ssh/id_orch_app_prod`              |
+| E   | Git HP         | GitLab         | git fetch bare HP <- GitLab              | `/home/deploy/.ssh/id_githp_gitlab`    |
+| F   | Git Prod       | Git HP         | git fetch bare Prod <- Git HP            | `/home/deploy/.ssh/id_gitprod_githp`   |
+| G   | App HP         | Git HP         | git fetch working tree App HP <- Git HP  | `/home/deploy/.ssh/id_apphp_githp`     |
+| H   | App Prod       | Git Prod       | git fetch working tree App Prod <- Git Prod | `/home/deploy/.ssh/id_appprod_gitprod` |
 
 ---
 
@@ -16,303 +26,319 @@
 ### Sur l'Orchestrateur (Semaphore)
 
 ```bash
-# Connecté en tant que l'utilisateur Semaphore (ex: semaphore)
-su - semaphore
+su - semaphore   # ou l'utilisateur qui lance Ansible
 
-# Clé A : Orchestrateur -> Hors-Prod (Ansible)
-ssh-keygen -t ed25519 -C "orch-to-hors-prod-ansible" \
-  -f ~/.ssh/id_orch_hp -N ""
+# Clé A : Orchestrateur -> Git HP (Ansible)
+ssh-keygen -t ed25519 -C "orch-to-git-hp" -f ~/.ssh/id_orch_git_hp -N ""
 
-# Clé B : Orchestrateur -> Prod (Ansible)
-ssh-keygen -t ed25519 -C "orch-to-prod-ansible" \
-  -f ~/.ssh/id_orch_prod -N ""
+# Clé B : Orchestrateur -> App HP (Ansible)
+ssh-keygen -t ed25519 -C "orch-to-app-hp" -f ~/.ssh/id_orch_app_hp -N ""
 
-# Vérification
-ls -la ~/.ssh/
-# id_orch_hp      id_orch_hp.pub
-# id_orch_prod    id_orch_prod.pub
+# Clé C : Orchestrateur -> Git Prod (Ansible)
+ssh-keygen -t ed25519 -C "orch-to-git-prod" -f ~/.ssh/id_orch_git_prod -N ""
+
+# Clé D : Orchestrateur -> App Prod (Ansible)
+ssh-keygen -t ed25519 -C "orch-to-app-prod" -f ~/.ssh/id_orch_app_prod -N ""
 ```
 
-### Sur Hors-Prod
+### Sur Git HP
 
 ```bash
-# Connecté en tant que l'utilisateur de déploiement (ex: deploy)
 su - deploy
 
-# Clé D : Hors-Prod -> GitLab (git fetch)
-ssh-keygen -t ed25519 -C "hors-prod-to-gitlab-git" \
-  -f ~/.ssh/id_hp_gitlab -N ""
+# Clé E : Git HP -> GitLab (git fetch bare)
+ssh-keygen -t ed25519 -C "git-hp-to-gitlab" -f ~/.ssh/id_githp_gitlab -N ""
 ```
 
-### Sur Prod
+### Sur Git Prod
 
 ```bash
-# Connecté en tant que l'utilisateur de déploiement (ex: deploy)
 su - deploy
 
-# Clé C : Prod -> Hors-Prod (git fetch)
-ssh-keygen -t ed25519 -C "prod-to-hors-prod-git" \
-  -f ~/.ssh/id_prod_hp_git -N ""
+# Clé F : Git Prod -> Git HP (git fetch bare)
+ssh-keygen -t ed25519 -C "git-prod-to-git-hp" -f ~/.ssh/id_gitprod_githp -N ""
+```
+
+### Sur App HP
+
+```bash
+su - deploy
+
+# Clé G : App HP -> Git HP (git fetch working tree)
+ssh-keygen -t ed25519 -C "app-hp-to-git-hp" -f ~/.ssh/id_apphp_githp -N ""
+```
+
+### Sur App Prod
+
+```bash
+su - deploy
+
+# Clé H : App Prod -> Git Prod (git fetch working tree)
+ssh-keygen -t ed25519 -C "app-prod-to-git-prod" -f ~/.ssh/id_appprod_gitprod -N ""
 ```
 
 ---
 
 ## Distribution des clés publiques
 
-### Clé A (Orchestrateur → Hors-Prod)
-
-Sur **Hors-Prod**, ajouter la clé publique de l'Orchestrateur :
+### Sur Git HP — autorise : Clé A (Ansible), Clé F (git Prod), Clé G (git App HP)
 
 ```bash
-# Sur Hors-Prod, en tant que deploy
-mkdir -p ~/.ssh && chmod 700 ~/.ssh
-cat >> ~/.ssh/authorized_keys << 'EOF'
-# Clé A — Ansible Orchestrateur
-<contenu de id_orch_hp.pub depuis l'Orchestrateur>
-EOF
-chmod 600 ~/.ssh/authorized_keys
+# Sur Git HP, en tant que deploy
+cat ~/.ssh/authorized_keys   # vérifier le fichier existant
+
+# Clé A : accès Ansible complet depuis l'Orchestrateur
+echo "# Clé A — Ansible Orchestrateur" >> ~/.ssh/authorized_keys
+cat /tmp/id_orch_git_hp.pub  >> ~/.ssh/authorized_keys
+
+# Clé F : Git Prod peut lire le dépôt bare (git-upload-pack uniquement)
+echo 'command="git-upload-pack /opt/git/myapp.git",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty <contenu de id_gitprod_githp.pub>' >> ~/.ssh/authorized_keys
+
+# Clé G : App HP peut lire le dépôt bare (git-upload-pack uniquement)
+echo 'command="git-upload-pack /opt/git/myapp.git",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty <contenu de id_apphp_githp.pub>' >> ~/.ssh/authorized_keys
 ```
 
-Ou via Ansible (playbook d'initialisation) :
+> **Important** : Les clés F et G sont restreintes avec `command="git-upload-pack ..."`.
+> Même si elles sont compromises, elles ne permettent pas d'ouvrir un shell ni d'écrire dans le dépôt.
 
-```yaml
-- name: Autoriser la clé Ansible de l'Orchestrateur sur Hors-Prod
-  ansible.posix.authorized_key:
-    user: deploy
-    state: present
-    key: "{{ lookup('file', '~/.ssh/id_orch_hp.pub') }}"
-    comment: "Ansible Orchestrateur - Clé A"
-```
-
-### Clé B (Orchestrateur → Prod)
-
-Identique à la Clé A, mais sur le serveur **Prod** :
+**Script de wrapper multi-dépôts** (si vous avez plusieurs applications) :
 
 ```bash
-# Sur Prod, en tant que deploy
-cat >> ~/.ssh/authorized_keys << 'EOF'
-# Clé B — Ansible Orchestrateur
-<contenu de id_orch_prod.pub depuis l'Orchestrateur>
-EOF
-```
-
-### Clé C (Prod → Hors-Prod, git uniquement)
-
-Sur **Hors-Prod**, ajouter la clé publique de Prod avec des **restrictions** :
-
-```bash
-# Sur Hors-Prod, en tant que deploy
-cat >> ~/.ssh/authorized_keys << 'EOF'
-# Clé C — Git fetch depuis Prod (lecture seule, git-upload-pack uniquement)
-command="git-upload-pack '/opt/apps/myapp'",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty <contenu de id_prod_hp_git.pub depuis Prod>
-EOF
-```
-
-> **Important** : La restriction `command="git-upload-pack ..."` limite la clé C
-> au seul usage git (lecture seule). Même si la clé est compromise, elle ne peut
-> pas ouvrir un shell interactif.
-
-Pour autoriser plusieurs dépôts, utiliser un wrapper script :
-
-```bash
-# /home/deploy/bin/git-shell-wrapper.sh
+# /home/deploy/bin/git-read-wrapper.sh
 #!/bin/bash
-# Autorise uniquement git-upload-pack sur les dépôts listés
-ALLOWED_REPOS=(
-  "/opt/apps/myapp"
-  "/opt/apps/myapp2"
+ALLOWED=(
+  "/opt/git/myapp.git"
+  "/opt/git/myapp2.git"
 )
-
 if [[ "$SSH_ORIGINAL_COMMAND" =~ ^git-upload-pack\ \'(.+)\'$ ]]; then
   REPO="${BASH_REMATCH[1]}"
-  for allowed in "${ALLOWED_REPOS[@]}"; do
-    if [[ "$REPO" == "$allowed" ]]; then
-      exec git-upload-pack "$REPO"
-    fi
+  for allowed in "${ALLOWED[@]}"; do
+    [[ "$REPO" == "$allowed" ]] && exec git-upload-pack "$REPO"
   done
 fi
-
-echo "Accès refusé : dépôt non autorisé ou commande invalide" >&2
-exit 1
+echo "Accès refusé" >&2; exit 1
 ```
 
 ```bash
-# Dans authorized_keys sur Hors-Prod :
-command="/home/deploy/bin/git-shell-wrapper.sh",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty <clé pub Prod>
+# Dans authorized_keys, remplacer git-upload-pack par le wrapper :
+command="/home/deploy/bin/git-read-wrapper.sh",no-port-forwarding,...
 ```
 
-### Clé D (Hors-Prod → GitLab)
+### Sur App HP — autorise : Clé B (Ansible)
 
-Sur **GitLab**, ajouter la clé publique de l'utilisateur de lecture :
+```bash
+# Sur App HP, en tant que deploy
+echo "# Clé B — Ansible Orchestrateur" >> ~/.ssh/authorized_keys
+cat /tmp/id_orch_app_hp.pub >> ~/.ssh/authorized_keys
+```
 
-1. Se connecter à GitLab avec le compte `ci-reader`
-2. Aller dans **Profile → SSH Keys**
-3. Coller le contenu de `id_hp_gitlab.pub`
-4. Nommer : `Hors-Prod deploy key`
-5. Valider
+### Sur Git Prod — autorise : Clé C (Ansible), Clé H (git App Prod)
 
-Ou via GitLab Deploy Keys (par projet, en lecture seule) — recommandé pour
-limiter l'accès au minimum nécessaire.
+```bash
+# Sur Git Prod, en tant que deploy
+
+# Clé C : accès Ansible complet depuis l'Orchestrateur
+echo "# Clé C — Ansible Orchestrateur" >> ~/.ssh/authorized_keys
+cat /tmp/id_orch_git_prod.pub >> ~/.ssh/authorized_keys
+
+# Clé H : App Prod peut lire le dépôt bare (git-upload-pack uniquement)
+echo 'command="git-upload-pack /opt/git/myapp.git",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty <contenu de id_appprod_gitprod.pub>' >> ~/.ssh/authorized_keys
+```
+
+### Sur App Prod — autorise : Clé D (Ansible)
+
+```bash
+# Sur App Prod, en tant que deploy
+echo "# Clé D — Ansible Orchestrateur" >> ~/.ssh/authorized_keys
+cat /tmp/id_orch_app_prod.pub >> ~/.ssh/authorized_keys
+```
+
+### Sur GitLab — autorise : Clé E (Git HP)
+
+1. Connectez-vous sur GitLab avec le compte `ci-reader` (lecture seule)
+2. **Profile → SSH Keys → Add new key**
+3. Coller le contenu de `id_githp_gitlab.pub`
+4. Titre : `Git HP deploy key`
+
+Ou via une **Deploy Key** sur le projet (plus restrictif, recommandé) :
+- **Projet → Settings → Repository → Deploy Keys**
+- Ajouter la clé E avec accès **lecture seule**
 
 ---
 
-## Configuration SSH côté clients
+## Fichiers `~/.ssh/config` sur chaque serveur
 
-### Fichier `~/.ssh/config` sur l'Orchestrateur
-
-```ssh-config
-# Hors-Prod — Ansible (Clé A)
-Host hors-prod
-    HostName hors-prod.company.com
-    User deploy
-    IdentityFile ~/.ssh/id_orch_hp
-    IdentitiesOnly yes
-    StrictHostKeyChecking accept-new
-    ServerAliveInterval 60
-    ServerAliveCountMax 3
-
-# Prod — Ansible (Clé B)
-Host prod
-    HostName prod.company.com
-    User deploy
-    IdentityFile ~/.ssh/id_orch_prod
-    IdentitiesOnly yes
-    StrictHostKeyChecking accept-new
-    ServerAliveInterval 60
-    ServerAliveCountMax 3
-```
-
-### Fichier `~/.ssh/config` sur Prod (pour git fetch)
+### Orchestrateur
 
 ```ssh-config
-# Hors-Prod — Git fetch uniquement (Clé C)
-Host hors-prod-git
-    HostName hors-prod.company.com
+# Git HP — Ansible (Clé A)
+Host git-hp
+    HostName git-hp.company.com
     User deploy
-    IdentityFile ~/.ssh/id_prod_hp_git
+    IdentityFile ~/.ssh/id_orch_git_hp
     IdentitiesOnly yes
     StrictHostKeyChecking accept-new
-    # Pas de ForwardAgent, pas de X11
-    ForwardAgent no
-    ForwardX11 no
+
+# App HP — Ansible (Clé B)
+Host app-hp
+    HostName app-hp.company.com
+    User deploy
+    IdentityFile ~/.ssh/id_orch_app_hp
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
+
+# Git Prod — Ansible (Clé C)
+Host git-prod
+    HostName git-prod.company.com
+    User deploy
+    IdentityFile ~/.ssh/id_orch_git_prod
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
+
+# App Prod — Ansible (Clé D)
+Host app-prod
+    HostName app-prod.company.com
+    User deploy
+    IdentityFile ~/.ssh/id_orch_app_prod
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
 ```
 
-Le remote Git sur Prod pointe alors vers :
-```
-git remote set-url staging git+ssh://hors-prod-git/opt/apps/myapp
-# ou simplement :
-git remote set-url staging deploy@hors-prod-git:/opt/apps/myapp
-```
-
-### Fichier `~/.ssh/config` sur Hors-Prod (pour git fetch GitLab)
+### Git HP
 
 ```ssh-config
-# GitLab — Git fetch uniquement (Clé D)
+# GitLab — git fetch bare (Clé E)
 Host gitlab
     HostName gitlab.company.com
     User git
-    IdentityFile ~/.ssh/id_hp_gitlab
+    IdentityFile ~/.ssh/id_githp_gitlab
     IdentitiesOnly yes
     StrictHostKeyChecking accept-new
     ForwardAgent no
-    ForwardX11 no
+```
+
+### Git Prod
+
+```ssh-config
+# Git HP — git fetch bare (Clé F)
+Host git-hp
+    HostName git-hp.company.com
+    User deploy
+    IdentityFile ~/.ssh/id_gitprod_githp
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
+    ForwardAgent no
+```
+
+### App HP
+
+```ssh-config
+# Git HP — git fetch working tree (Clé G)
+Host git-hp
+    HostName git-hp.company.com
+    User deploy
+    IdentityFile ~/.ssh/id_apphp_githp
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
+    ForwardAgent no
+```
+
+### App Prod
+
+```ssh-config
+# Git Prod — git fetch working tree (Clé H)
+Host git-prod
+    HostName git-prod.company.com
+    User deploy
+    IdentityFile ~/.ssh/id_appprod_gitprod
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
+    ForwardAgent no
 ```
 
 ---
 
-## Ajout des known_hosts (anti-MITM)
+## Enregistrement des known_hosts
 
 Pré-enregistrer les fingerprints pour éviter les prompts interactifs :
 
-### Sur l'Orchestrateur
-
 ```bash
-# Enregistrer les fingerprints de Hors-Prod et Prod
-ssh-keyscan -H hors-prod.company.com >> ~/.ssh/known_hosts
-ssh-keyscan -H prod.company.com       >> ~/.ssh/known_hosts
+# Sur l'Orchestrateur
+ssh-keyscan -H git-hp.company.com  >> ~/.ssh/known_hosts
+ssh-keyscan -H app-hp.company.com  >> ~/.ssh/known_hosts
+ssh-keyscan -H git-prod.company.com >> ~/.ssh/known_hosts
+ssh-keyscan -H app-prod.company.com >> ~/.ssh/known_hosts
+
+# Sur Git HP
+ssh-keyscan -H gitlab.company.com  >> ~/.ssh/known_hosts
+
+# Sur Git Prod
+ssh-keyscan -H git-hp.company.com  >> ~/.ssh/known_hosts
+
+# Sur App HP
+ssh-keyscan -H git-hp.company.com  >> ~/.ssh/known_hosts
+
+# Sur App Prod
+ssh-keyscan -H git-prod.company.com >> ~/.ssh/known_hosts
 ```
-
-### Sur Hors-Prod
-
-```bash
-# Enregistrer le fingerprint de GitLab
-ssh-keyscan -H gitlab.company.com >> ~/.ssh/known_hosts
-```
-
-### Sur Prod
-
-```bash
-# Enregistrer le fingerprint de Hors-Prod (pour git)
-ssh-keyscan -H hors-prod.company.com >> ~/.ssh/known_hosts
-```
-
-> Vérifier les fingerprints manuellement lors de la première installation
-> en les comparant avec ceux fournis par l'administrateur système.
 
 ---
 
 ## Tests de connectivité
 
-### Depuis l'Orchestrateur
-
 ```bash
-# Test Clé A (Ansible vers Hors-Prod)
-ssh -i ~/.ssh/id_orch_hp deploy@hors-prod "echo 'Clé A OK'"
+# Depuis l'Orchestrateur
+ssh -i ~/.ssh/id_orch_git_hp  deploy@git-hp   "echo 'Clé A OK'"
+ssh -i ~/.ssh/id_orch_app_hp  deploy@app-hp   "echo 'Clé B OK'"
+ssh -i ~/.ssh/id_orch_git_prod deploy@git-prod "echo 'Clé C OK'"
+ssh -i ~/.ssh/id_orch_app_prod deploy@app-prod "echo 'Clé D OK'"
 
-# Test Clé B (Ansible vers Prod)
-ssh -i ~/.ssh/id_orch_prod deploy@prod "echo 'Clé B OK'"
-```
-
-### Depuis Hors-Prod
-
-```bash
-# Test Clé D (git fetch depuis GitLab)
+# Depuis Git HP (Clé E)
 ssh -T git@gitlab.company.com
-# Réponse attendue : "Welcome to GitLab, @ci-reader!"
-```
+# Réponse : "Welcome to GitLab, @ci-reader!"
 
-### Depuis Prod
+# Depuis Git Prod (Clé F — git fetch depuis Git HP)
+GIT_SSH_COMMAND="ssh -i ~/.ssh/id_gitprod_githp" \
+  git ls-remote deploy@git-hp:/opt/git/myapp.git
 
-```bash
-# Test Clé C (git fetch depuis Hors-Prod)
-ssh -i ~/.ssh/id_prod_hp_git deploy@hors-prod "echo 'Clé C OK'"
+# Depuis App HP (Clé G — git fetch depuis Git HP)
+GIT_SSH_COMMAND="ssh -i ~/.ssh/id_apphp_githp" \
+  git ls-remote deploy@git-hp:/opt/git/myapp.git
 
-# Test git clone depuis Hors-Prod
-GIT_SSH_COMMAND="ssh -i ~/.ssh/id_prod_hp_git" \
-  git ls-remote deploy@hors-prod.company.com:/opt/apps/myapp
-```
-
----
-
-## Rotation des clés
-
-La rotation doit être effectuée sans interruption de service :
-
-1. Générer la nouvelle paire de clés
-2. Ajouter la **nouvelle clé publique** dans `authorized_keys` côté destination
-3. Tester la nouvelle clé
-4. Mettre à jour la configuration Semaphore (nouvelle clé privée)
-5. Supprimer l'**ancienne clé publique** de `authorized_keys`
-6. Supprimer l'ancienne clé privée
-
-```bash
-# Etape 2 : ajouter sans supprimer l'ancienne
-echo "<nouvelle_cle_pub>" >> ~/.ssh/authorized_keys
-
-# Etape 5 : supprimer l'ancienne (identifier par commentaire ou debut de cle)
-sed -i '/orch-to-hors-prod-ansible-old/d' ~/.ssh/authorized_keys
+# Depuis App Prod (Clé H — git fetch depuis Git Prod)
+GIT_SSH_COMMAND="ssh -i ~/.ssh/id_appprod_gitprod" \
+  git ls-remote deploy@git-prod:/opt/git/myapp.git
 ```
 
 ---
 
 ## Matrice de permissions réseau (pare-feu)
 
-| Source            | Destination       | Port | Protocole | Règle        |
-|-------------------|-------------------|------|-----------|--------------|
-| Orchestrateur     | Hors-Prod         | 22   | TCP       | AUTORISER    |
-| Orchestrateur     | Prod              | 22   | TCP       | AUTORISER    |
-| Prod              | Hors-Prod         | 22   | TCP       | AUTORISER    |
-| Hors-Prod         | GitLab            | 22   | TCP       | AUTORISER    |
-| GitLab            | Hors-Prod/Prod    | *    | *         | BLOQUER      |
-| Internet          | tous serveurs     | *    | *         | BLOQUER      |
-| Prod              | Internet          | *    | *         | BLOQUER      |
+| Source         | Destination    | Port | Protocole | Règle     |
+|----------------|----------------|------|-----------|-----------|
+| Orchestrateur  | Git HP         | 22   | TCP       | AUTORISER |
+| Orchestrateur  | App HP         | 22   | TCP       | AUTORISER |
+| Orchestrateur  | Git Prod       | 22   | TCP       | AUTORISER |
+| Orchestrateur  | App Prod       | 22   | TCP       | AUTORISER |
+| Git HP         | GitLab         | 22   | TCP       | AUTORISER |
+| Git Prod       | Git HP         | 22   | TCP       | AUTORISER |
+| App HP         | Git HP         | 22   | TCP       | AUTORISER |
+| App Prod       | Git Prod       | 22   | TCP       | AUTORISER |
+| GitLab         | tout interne   | *    | *         | BLOQUER   |
+| Internet       | tout interne   | *    | *         | BLOQUER   |
+
+---
+
+## Procédure de rotation des clés (sans interruption)
+
+```
+1. Générer la nouvelle paire de clés (nouvelle_cle / nouvelle_cle.pub)
+2. Ajouter nouvelle_cle.pub dans authorized_keys côté destination
+3. Tester la nouvelle clé (ssh -i nouvelle_cle ...)
+4. Mettre à jour la configuration Semaphore (Key Store) avec la nouvelle clé privée
+5. Supprimer l'ancienne clé publique de authorized_keys
+6. Supprimer l'ancienne clé privée
+
+Identification des clés : utiliser les commentaires (-C lors de ssh-keygen)
+pour retrouver facilement quelle clé supprimer dans authorized_keys.
+```

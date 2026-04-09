@@ -1,0 +1,108 @@
+---
+# ─── Synchronisation : Dépôt Bare (Serveurs Git HP et Git Prod) ───────────────
+#
+# Un dépôt bare ne contient que les objets Git (pas de working tree).
+# Il sert de miroir/relais entre deux niveaux du pipeline :
+#   Git HP   : miroir de GitLab
+#   Git Prod : miroir de Git HP
+#
+# Flux d'exécution :
+#   Orchestrateur --SSH--> Git Server --git fetch--> Source (GitLab ou Git HP)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─── 1. Créer le répertoire du dépôt bare ─────────────────────────────────────
+
+- name: "[bare] Créer le répertoire du dépôt bare"
+  ansible.builtin.file:
+    path: "{{ git_bare_root }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: "0755"
+  become: true
+  become_user: root
+
+# ─── 2. Initialiser le dépôt bare si absent ────────────────────────────────────
+
+- name: "[bare] Vérifier si le dépôt bare est initialisé"
+  ansible.builtin.stat:
+    path: "{{ git_bare_root }}/HEAD"
+  register: bare_head
+
+- name: "[bare] Initialiser le dépôt bare (premier déploiement)"
+  ansible.builtin.command:
+    cmd: "git clone --bare --origin {{ git_remote_name }} {{ git_remote_url }} {{ git_bare_root }}"
+  when:
+    - not bare_head.stat.exists
+    - git_init_if_missing | default(true)
+  environment:
+    GIT_SSH_COMMAND: "ssh -i {{ git_ssh_key_path }} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+  register: clone_bare_result
+
+- name: "[bare] Afficher le résultat du clone bare"
+  ansible.builtin.debug:
+    var: clone_bare_result.stderr_lines
+  when: clone_bare_result is defined and clone_bare_result.changed
+
+# ─── 3. Vérifier et corriger l'URL du remote ──────────────────────────────────
+
+- name: "[bare] Vérifier l'URL du remote"
+  ansible.builtin.command:
+    cmd: "git remote get-url {{ git_remote_name }}"
+    chdir: "{{ git_bare_root }}"
+  register: current_remote_url
+  changed_when: false
+  failed_when: false
+
+- name: "[bare] Ajouter le remote s'il est absent"
+  ansible.builtin.command:
+    cmd: "git remote add {{ git_remote_name }} {{ git_remote_url }}"
+    chdir: "{{ git_bare_root }}"
+  when: current_remote_url.rc != 0
+
+- name: "[bare] Corriger l'URL du remote si elle a changé"
+  ansible.builtin.command:
+    cmd: "git remote set-url {{ git_remote_name }} {{ git_remote_url }}"
+    chdir: "{{ git_bare_root }}"
+  when:
+    - current_remote_url.rc == 0
+    - current_remote_url.stdout | trim != git_remote_url
+
+# ─── 4. Fetch : mise à jour du miroir ─────────────────────────────────────────
+
+- name: "[bare] git fetch --all (mise à jour du miroir)"
+  ansible.builtin.command:
+    cmd: "git fetch {{ git_remote_name }} --prune --tags --force"
+    chdir: "{{ git_bare_root }}"
+  environment:
+    GIT_SSH_COMMAND: "ssh -i {{ git_ssh_key_path }} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+  register: fetch_result
+
+- name: "[bare] Afficher les objets récupérés"
+  ansible.builtin.debug:
+    msg: "{{ fetch_result.stderr_lines | default([]) + fetch_result.stdout_lines | default([]) }}"
+
+# ─── 5. Vérification post-fetch ───────────────────────────────────────────────
+
+- name: "[bare] Lister les branches disponibles dans le miroir"
+  ansible.builtin.command:
+    cmd: git branch -a
+    chdir: "{{ git_bare_root }}"
+  register: branches_result
+  changed_when: false
+
+- name: "[bare] Afficher les branches du miroir"
+  ansible.builtin.debug:
+    var: branches_result.stdout_lines
+
+- name: "[bare] Récupérer le dernier commit de la branche cible"
+  ansible.builtin.command:
+    cmd: "git log {{ git_remote_name }}/{{ git_branch }} --oneline -1"
+    chdir: "{{ git_bare_root }}"
+  register: latest_commit
+  changed_when: false
+  failed_when: false
+
+- name: "[bare] Afficher le dernier commit disponible"
+  ansible.builtin.debug:
+    msg: "Dernier commit sur {{ git_branch }} : {{ latest_commit.stdout | default('N/A') }}"
