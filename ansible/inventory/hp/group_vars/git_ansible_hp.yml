@@ -1,0 +1,15 @@
+---
+# Variables — Serveur Git+Ansible HP
+# Ce serveur héberge les dépôts bare et a Ansible installé
+
+# Répertoire racine des dépôts bare
+git_bare_base: /opt/git
+
+# Remote utilisé pour fetcher depuis GitLab
+git_remote_name: origin
+
+# Clé SSH que CE SERVEUR utilise pour se connecter à GitLab (Clé B)
+git_ssh_key_path: "/home/{{ app_user }}/.ssh/id_gitansiblehp_gitlab"
+
+# Alias SSH GitLab (défini dans ~/.ssh/config sur ce serveur)
+gitlab_ssh_host: gitlab

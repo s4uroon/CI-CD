@@ -1,0 +1,15 @@
+---
+# Variables communes — Zone Hors-Production
+app_user: deploy
+app_group: deploy
+git_branch: main
+git_tag: ""
+run_migrations: true
+db_backup_before_migration: false   # Pas de backup BDD en HP
+log_dir: "/var/log/apps"
+php_version: "8.2"
+composer_path: /usr/local/bin/composer
+composer_args: "--no-dev --optimize-autoloader --no-interaction"
+php_fpm_service: "php{{ php_version }}-fpm"
+python_venv_path: "/opt/apps/.venv"
+clear_cache: true

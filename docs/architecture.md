@@ -1,15 +1,20 @@
 # Architecture — Pipeline de Déploiement Sécurisé
 
-## Infrastructure : 6 serveurs distincts
+## Infrastructure : 2 zones indépendantes
 
-| Serveur            | Hostname                  | Zone          | Rôle                                      |
-|--------------------|---------------------------|---------------|-------------------------------------------|
-| GitLab Central     | gitlab.company.com        | Externe/DMZ   | Stockage source de vérité (pas de CI/CD)  |
-| Git Server HP      | git-hp.company.com        | Hors-Prod     | Dépôt bare, miroir de GitLab              |
-| App Server HP      | app-hp.company.com        | Hors-Prod     | Application PHP/Python + working tree     |
-| Git Server Prod    | git-prod.company.com      | Production    | Dépôt bare, miroir de Git HP             |
-| App Server Prod    | app-prod.company.com      | Production    | Application PHP/Python + working tree     |
-| Orchestrateur      | semaphore.prod.company.com| Production    | Ansible Semaphore, point d'entrée unique  |
+| Serveur              | Hostname                      | Zone          | Rôle                                              |
+|----------------------|-------------------------------|---------------|---------------------------------------------------|
+| GitLab Central       | gitlab.company.com            | Externe/DMZ   | Stockage source de vérité (pas de CI/CD)          |
+| Semaphore HP         | semaphore-hp.company.com      | Hors-Prod     | Semaphore UI + Ansible control node HP            |
+| Git+Ansible HP       | git-ansible-hp.company.com    | Hors-Prod     | Dépôt bare miroir + Ansible installé              |
+| App Server(s) HP     | app[n]-hp.company.com         | Hors-Prod     | N serveurs applicatifs HP (PHP/Python)            |
+| Semaphore Prod       | semaphore-prod.company.com    | Production    | Semaphore UI + Ansible control node Prod          |
+| Git+Ansible Prod     | git-ansible-prod.company.com  | Production    | Dépôt bare miroir + Ansible installé              |
+| App Server(s) Prod   | app[n]-prod.company.com       | Production    | N serveurs applicatifs Prod (PHP/Python)          |
+
+> **Git+Ansible HP/Prod** : ces serveurs hébergent à la fois le dépôt bare Git
+> et une installation Ansible. Semaphore se connecte dessus (SSH) pour lancer
+> les opérations git ; les serveurs App se connectent dessus pour fetcher le code.
 
 ---
 
@@ -18,37 +23,39 @@
 ```mermaid
 flowchart TD
     DEV(["👨‍💻 Développeur"])
-    GITLAB[("🗄️ GitLab Central\ngitlab.company.com\n[Stockage uniquement]")]
+    GITLAB[("🗄️ GitLab Central\ngitlab.company.com\n[Source de vérité]")]
 
-    subgraph ZONE_HP["Zone Hors-Production (DMZ)"]
-        GIT_HP[("📦 Git Server HP\ngit-hp.company.com\nDépôt bare\n/opt/git/myapp.git")]
-        APP_HP["⚙️ App Server HP\napp-hp.company.com\n/opt/apps/myapp\n[working tree]"]
+    subgraph ZONE_HP["Zone Hors-Production"]
+        SEM_HP["🎛️ Semaphore HP\nsemaphore-hp\n[Control node HP]"]
+        GIT_HP[("📦 Git+Ansible HP\ngit-ansible-hp\n/opt/git/<repo>.git")]
+        APP_HP["⚙️ App Server(s) HP\napp[n]-hp\n/opt/apps/<repo>"]
     end
 
     subgraph ZONE_PROD["Zone Production"]
-        SEMAPHORE["🎛️ Orchestrateur\nsemaphore.prod.company.com\nAnsible Semaphore"]
-        GIT_PROD[("📦 Git Server Prod\ngit-prod.company.com\nDépôt bare\n/opt/git/myapp.git")]
-        APP_PROD["⚙️ App Server Prod\napp-prod.company.com\n/opt/apps/myapp\n[working tree]"]
+        SEM_PROD["🎛️ Semaphore Prod\nsemaphore-prod\n[Control node Prod]"]
+        GIT_PROD[("📦 Git+Ansible Prod\ngit-ansible-prod\n/opt/git/<repo>.git")]
+        APP_PROD["⚙️ App Server(s) Prod\napp[n]-prod\n/opt/apps/<repo>"]
     end
 
     DEV -->|"git push"| GITLAB
 
-    SEMAPHORE -->|"SSH Clé A\n[Bouton 1] Synchro Git HP"| GIT_HP
-    GIT_HP -->|"git fetch\n(Clé E)"| GITLAB
+    SEM_HP  -->|"SSH Clé A — Ansible"| GIT_HP
+    GIT_HP  -->|"git fetch Clé B"| GITLAB
+    SEM_HP  -->|"SSH Clé C — Ansible"| APP_HP
+    APP_HP  -->|"git fetch Clé D"| GIT_HP
 
-    SEMAPHORE -->|"SSH Clé B\n[Bouton 2] Déployer HP"| APP_HP
-    APP_HP -->|"git fetch\n(Clé G)"| GIT_HP
+    GIT_HP  -->|"tag validated/hp/<repo>\n[Flag validation]"| GIT_HP
 
-    SEMAPHORE -->|"SSH Clé C\n[Bouton 3] Synchro Git Prod"| GIT_PROD
-    GIT_PROD -->|"git fetch\n(Clé F)"| GIT_HP
-
-    SEMAPHORE -->|"SSH Clé D\n[Bouton 4] Déployer Prod"| APP_PROD
-    APP_PROD -->|"git fetch\n(Clé H)"| GIT_PROD
+    SEM_PROD -->|"SSH Clé E — Ansible"| GIT_PROD
+    GIT_PROD -->|"SSH Clé F — check flag + git fetch"| GIT_HP
+    SEM_PROD -->|"SSH Clé G — Ansible"| APP_PROD
+    APP_PROD -->|"git fetch Clé H"| GIT_PROD
 
     style ZONE_HP fill:#e6f3ff,stroke:#3182ce,color:#1a365d
     style ZONE_PROD fill:#fff5e6,stroke:#dd6b20,color:#7b341e
     style GITLAB fill:#fc6d26,color:#fff
-    style SEMAPHORE fill:#2d3748,color:#fff
+    style SEM_HP fill:#2b6cb0,color:#fff
+    style SEM_PROD fill:#c05621,color:#fff
     style DEV fill:#48bb78,color:#fff
     style GIT_HP fill:#3182ce,color:#fff
     style GIT_PROD fill:#dd6b20,color:#fff
@@ -56,28 +63,30 @@ flowchart TD
 
 ---
 
-## Schéma des 8 clés SSH
+## Les 8 clés SSH
 
 ```mermaid
 graph LR
-    ORCH["🔑 Orchestrateur"]
-    GIT_HP["📦 Git HP"]
+    SEM_HP["🎛️ Semaphore HP"]
+    SEM_PROD["🎛️ Semaphore Prod"]
+    GIT_HP["📦 Git+Ansible HP"]
     APP_HP["⚙️ App HP"]
-    GIT_PROD["📦 Git Prod"]
+    GIT_PROD["📦 Git+Ansible Prod"]
     APP_PROD["⚙️ App Prod"]
     GITLAB["🗄️ GitLab"]
 
-    ORCH -->|"Clé A — Ansible pilote"| GIT_HP
-    ORCH -->|"Clé B — Ansible pilote"| APP_HP
-    ORCH -->|"Clé C — Ansible pilote"| GIT_PROD
-    ORCH -->|"Clé D — Ansible pilote"| APP_PROD
+    SEM_HP   -->|"Clé A — SSH Ansible"| GIT_HP
+    GIT_HP   -->|"Clé B — git fetch"| GITLAB
+    SEM_HP   -->|"Clé C — SSH Ansible"| APP_HP
+    APP_HP   -->|"Clé D — git fetch"| GIT_HP
 
-    GIT_HP   -->|"Clé E — git fetch"| GITLAB
-    GIT_PROD -->|"Clé F — git fetch"| GIT_HP
-    APP_HP   -->|"Clé G — git fetch"| GIT_HP
+    SEM_PROD -->|"Clé E — SSH Ansible"| GIT_PROD
+    GIT_PROD -->|"Clé F — SSH check flag + git fetch"| GIT_HP
+    SEM_PROD -->|"Clé G — SSH Ansible"| APP_PROD
     APP_PROD -->|"Clé H — git fetch"| GIT_PROD
 
-    style ORCH fill:#2d3748,color:#fff
+    style SEM_HP fill:#2b6cb0,color:#fff
+    style SEM_PROD fill:#c05621,color:#fff
     style GIT_HP fill:#3182ce,color:#fff
     style APP_HP fill:#63b3ed,color:#fff
     style GIT_PROD fill:#dd6b20,color:#fff
@@ -85,16 +94,38 @@ graph LR
     style GITLAB fill:#fc6d26,color:#fff
 ```
 
-| Clé | Source       | Destination  | Type accès       | Fichier clé privée (sur la source)          |
-|-----|--------------|--------------|------------------|---------------------------------------------|
-| A   | Orchestrateur| Git HP       | SSH Ansible      | `~/.ssh/id_orch_git_hp`                    |
-| B   | Orchestrateur| App HP       | SSH Ansible      | `~/.ssh/id_orch_app_hp`                    |
-| C   | Orchestrateur| Git Prod     | SSH Ansible      | `~/.ssh/id_orch_git_prod`                  |
-| D   | Orchestrateur| App Prod     | SSH Ansible      | `~/.ssh/id_orch_app_prod`                  |
-| E   | Git HP       | GitLab       | git (read-only)  | `/home/deploy/.ssh/id_githp_gitlab`        |
-| F   | Git Prod     | Git HP       | git (read-only)  | `/home/deploy/.ssh/id_gitprod_githp`       |
-| G   | App HP       | Git HP       | git (read-only)  | `/home/deploy/.ssh/id_apphp_githp`         |
-| H   | App Prod     | Git Prod     | git (read-only)  | `/home/deploy/.ssh/id_appprod_gitprod`     |
+| Clé | Source           | Destination      | Type accès           | Fichier clé privée (sur la source)               |
+|-----|------------------|------------------|----------------------|--------------------------------------------------|
+| A   | Semaphore HP     | Git+Ansible HP   | SSH Ansible          | `~/.ssh/id_semaphore_hp`                         |
+| B   | Git+Ansible HP   | GitLab           | git fetch (read-only)| `/opt/keys/id_githp_gitlab`                      |
+| C   | Semaphore HP     | App Server(s) HP | SSH Ansible          | `~/.ssh/id_semaphore_hp_apps`                    |
+| D   | App Server(s) HP | Git+Ansible HP   | git fetch (read-only)| `/opt/keys/id_apphp_to_githp`                    |
+| E   | Semaphore Prod   | Git+Ansible Prod | SSH Ansible          | `~/.ssh/id_semaphore_prod`                       |
+| F   | Git+Ansible Prod | Git+Ansible HP   | SSH + git fetch      | `/opt/keys/id_gitprod_to_githp`                  |
+| G   | Semaphore Prod   | App Server(s) Prod| SSH Ansible         | `~/.ssh/id_semaphore_prod_apps`                  |
+| H   | App Server(s) Prod| Git+Ansible Prod| git fetch (read-only)| `/opt/keys/id_appprod_to_gitprod`                |
+
+> Les clés D, H sont strictement read-only (`command="git-upload-pack ..."` dans `authorized_keys`).
+> La clé F a accès SSH pour vérifier le flag git et pour git fetch.
+
+---
+
+## Les 5 boutons Semaphore
+
+### Semaphore HP — 3 boutons
+
+| Bouton | Playbook                       | Cible Ansible              | Action                                          |
+|--------|--------------------------------|----------------------------|-------------------------------------------------|
+| 1      | `hp/01_sync_git_hp.yml`        | `git_ansible_hp`           | Fetche GitLab → miroir bare HP                  |
+| 2      | `hp/02_deploy_hp.yml`          | `git_ansible_hp` + App HP  | Déploie le code sur les serveurs App HP         |
+| 3      | `hp/03_validate_hp.yml`        | `git_ansible_hp`           | Pose le tag `validated/hp/<repo>` sur bare HP   |
+
+### Semaphore Prod — 2 boutons
+
+| Bouton | Playbook                       | Cible Ansible              | Action                                          |
+|--------|--------------------------------|----------------------------|-------------------------------------------------|
+| 1      | `prod/01_sync_git_prod.yml`    | `git_ansible_prod`         | Vérifie flag HP, fetche Git HP → miroir bare Prod|
+| 2      | `prod/02_deploy_prod.yml`      | `git_ansible_prod` + App Prod| Sauvegarde BDD + déploiement sur App Prod      |
 
 ---
 
@@ -102,82 +133,136 @@ graph LR
 
 ```mermaid
 sequenceDiagram
-    actor OPS as Opérateur
-    participant SEM as Semaphore<br/>(Orchestrateur)
-    participant GHP as Git Server HP<br/>(bare)
-    participant AHP as App Server HP<br/>(working tree)
+    actor OPS_HP as Opérateur HP
+    actor OPS_PROD as Opérateur Prod
+    participant SHP as Semaphore HP
+    participant GHP as Git+Ansible HP
+    participant AHP as App HP
     participant GL as GitLab
-    participant GPROD as Git Server Prod<br/>(bare)
-    participant APROD as App Server Prod<br/>(working tree)
+    participant SPROD as Semaphore Prod
+    participant GPROD as Git+Ansible Prod
+    participant APROD as App Prod
 
-    Note over OPS,APROD: BOUTON 1 — Synchro Git HP
+    Note over OPS_HP,AHP: ─── ZONE HP ───
 
-    OPS->>SEM: Clic "Synchro Git HP"
-    SEM->>GHP: SSH (Clé A) + playbook 01
-    GHP->>GL: git fetch --all --tags (Clé E)
+    OPS_HP->>SHP: Bouton 1 — Synchro Git HP
+    SHP->>GHP: SSH Clé A + playbook 01
+    GHP->>GL: git fetch (Clé B)
     GL-->>GHP: objets Git
-    GHP-->>SEM: Miroir bare mis à jour
-    SEM-->>OPS: OK — commit affiché
+    GHP-->>SHP: miroir HP mis à jour
 
-    Note over OPS,APROD: BOUTON 2 — Déployer HP
-
-    OPS->>SEM: Clic "Déployer HP"
-    SEM->>AHP: SSH (Clé B) + playbook 02
-    AHP->>GHP: git fetch (Clé G)
+    OPS_HP->>SHP: Bouton 2 — Déployer HP
+    SHP->>AHP: SSH Clé C + playbook 02
+    AHP->>GHP: git fetch (Clé D)
     GHP-->>AHP: objets Git
-    AHP->>AHP: git checkout + deps + migrations
-    AHP->>AHP: reload service
-    AHP-->>SEM: OK
-    SEM-->>OPS: OK — Validation QA
+    AHP->>AHP: checkout + deps + migrations + reload
+    AHP-->>SHP: déploiement OK
 
-    Note over OPS,APROD: VALIDATION QA sur Hors-Prod
+    Note over OPS_HP,AHP: Tests QA / validation humaine
 
-    OPS->>OPS: Tests fonctionnels
+    OPS_HP->>SHP: Bouton 3 — Valider HP
+    SHP->>GHP: SSH Clé A + playbook 03
+    GHP->>GHP: git tag validated/hp/<repo>
+    GHP-->>SHP: flag posé
 
-    Note over OPS,APROD: BOUTON 3 — Synchro Git Prod
+    Note over OPS_PROD,APROD: ─── ZONE PROD ───
 
-    OPS->>SEM: Clic "Synchro Git Prod"
-    SEM->>GPROD: SSH (Clé C) + playbook 03
-    GPROD->>GHP: git fetch --all --tags (Clé F)
+    OPS_PROD->>SPROD: Bouton 1 — Synchro Git Prod
+    SPROD->>GPROD: SSH Clé E + playbook 01
+    GPROD->>GHP: SSH Clé F — vérif. flag
+    GHP-->>GPROD: flag présent ✓
+    GPROD->>GHP: git fetch (Clé F)
     GHP-->>GPROD: objets Git
-    GPROD-->>SEM: Miroir bare Prod mis à jour
-    SEM-->>OPS: OK — commit affiché
+    GPROD-->>SPROD: miroir Prod mis à jour
 
-    Note over OPS,APROD: BOUTON 4 — Déployer Prod
-
-    OPS->>SEM: Clic "Déployer Prod"
-    SEM->>APROD: SSH (Clé D) + playbook 04
+    OPS_PROD->>SPROD: Bouton 2 — Déployer Prod
+    SPROD->>APROD: SSH Clé G + playbook 02
+    APROD->>APROD: sauvegarde BDD (pg_dump)
     APROD->>GPROD: git fetch (Clé H)
     GPROD-->>APROD: objets Git
-    APROD->>APROD: git checkout + sauvegarde BDD
-    APROD->>APROD: deps + migrations + reload
-    APROD-->>SEM: OK
-    SEM-->>OPS: OK
+    APROD->>APROD: checkout + deps + migrations + reload
+    APROD->>APROD: health check HTTP
+    APROD-->>SPROD: déploiement OK
 ```
+
+---
+
+## Flag de validation HP
+
+Le **Bouton 3 HP** crée un tag git sur le dépôt bare HP :
+
+```
+validated/hp/<repo_name>    →   pointant sur le commit actuellement déployé en HP
+```
+
+Le **Bouton 1 Prod** vérifie ce flag via SSH avant tout fetch :
+
+```bash
+# Vérification depuis Git+Ansible Prod
+ssh -i /opt/keys/id_gitprod_to_githp deploy@git-ansible-hp \
+  "git -C /opt/git/myapp.git tag -l 'validated/hp/myapp'"
+```
+
+- **Absent** → playbook échoue avec message listant les boutons HP à exécuter
+- **Présent** → fetch autorisé, commit validé affiché
+
+Voir [docs/validation-flag.md](./validation-flag.md) pour le détail complet.
+
+---
+
+## Configuration par dépôt
+
+Chaque dépôt applicatif dispose d'un fichier `ansible/repos/<repo_name>.yml` :
+
+```yaml
+# ansible/repos/myapp.yml
+repo_name: myapp
+git_remote_url: "git@gitlab.company.com:mygroup/myapp.git"
+git_branch: main
+app_type: php          # ou "python" ou "static"
+
+app_root: "/opt/apps/myapp"
+app_service_name: myapp
+app_user: deploy
+app_group: deploy
+
+# Serveurs cibles (liste configurable par dépôt)
+app_servers_hp:
+  - app1-hp.company.com
+  - app2-hp.company.com    # ajouter autant de serveurs que nécessaire
+
+app_servers_prod:
+  - app1-prod.company.com
+  - app2-prod.company.com
+
+run_migrations: true
+db_host_prod: prod-db.company.com
+db_name_prod: myapp_prod
+db_user_prod: app_user
+```
+
+Le playbook reçoit `repo_name` comme **Survey Variable** dans Semaphore,
+charge `ansible/repos/{{ repo_name }}.yml`, puis construit dynamiquement
+le groupe de serveurs cibles via `add_host`.
 
 ---
 
 ## Nature des dépôts Git
 
 ```
-Git Server HP    (/opt/git/myapp.git)   → BARE REPOSITORY
-Git Server Prod  (/opt/git/myapp.git)   → BARE REPOSITORY
+Git+Ansible HP    (/opt/git/<repo>.git)   → BARE REPOSITORY
+Git+Ansible Prod  (/opt/git/<repo>.git)   → BARE REPOSITORY
 
   Dépôt bare = uniquement les objets Git, pas de working tree.
   Sert de miroir/relais. Aucun code ne s'exécute ici.
+  Contenu : HEAD  branches/  config  hooks/  objects/  refs/
 
-  Contenu :
-    HEAD  branches/  config  description
-    hooks/  info/  objects/  packed-refs  refs/
-
-App Server HP    (/opt/apps/myapp)      → WORKING TREE
-App Server Prod  (/opt/apps/myapp)      → WORKING TREE
+App Server(s) HP    (/opt/apps/<repo>)    → WORKING TREE
+App Server(s) Prod  (/opt/apps/<repo>)    → WORKING TREE
 
   Working tree = dépôt + fichiers sources visibles.
   C'est ici que le code PHP/Python s'exécute.
-
-  Contenu :
-    .git/   index.php   app/   config/   ...
+  Contenu : .git/   index.php   app/   config/   ...
 ```
 
 ---
@@ -185,38 +270,44 @@ App Server Prod  (/opt/apps/myapp)      → WORKING TREE
 ## Zones réseau et flux autorisés
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  ZONE PRODUCTION                                                             │
-│                                                                              │
-│  ┌─────────────────────┐    Clé A    ┌───────────────────────┐              │
-│  │  Orchestrateur      │────────────►│  Git Server HP        │              │
-│  │  (Semaphore)        │    Clé B    ├───────────────────────┤              │
-│  │                     │────────────►│  App Server HP        │  ZONE HP     │
-│  │                     │    Clé C    ├───────────────────────┤              │
-│  │                     │────────────►│  Git Server Prod      │              │
-│  │                     │    Clé D    ├───────────────────────┤              │
-│  │                     │────────────►│  App Server Prod      │              │
-│  └─────────────────────┘            └───────────────────────┘              │
-└──────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│  ZONE HORS-PROD                                                         │
+│                                                                         │
+│  ┌──────────────────┐   Clé A   ┌──────────────────────────────────┐   │
+│  │  Semaphore HP    │──────────►│  Git+Ansible HP                  │   │
+│  │                  │   Clé C   │  (bare /opt/git/*.git)            │   │
+│  │                  │──────────►│  App Server(s) HP                │   │
+│  └──────────────────┘          └──────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────┘
 
-Connexions git initiées PAR les serveurs cibles :
+┌─────────────────────────────────────────────────────────────────────────┐
+│  ZONE PROD                                                              │
+│                                                                         │
+│  ┌──────────────────┐   Clé E   ┌──────────────────────────────────┐   │
+│  │  Semaphore Prod  │──────────►│  Git+Ansible Prod                │   │
+│  │                  │   Clé G   │  (bare /opt/git/*.git)            │   │
+│  │                  │──────────►│  App Server(s) Prod              │   │
+│  └──────────────────┘          └──────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────┘
 
-  Git HP   --Clé E--> GitLab   (git fetch depuis HP vers GitLab)
-  Git Prod --Clé F--> Git HP   (git fetch depuis Prod vers HP)
-  App HP   --Clé G--> Git HP   (git fetch pour déploiement)
-  App Prod --Clé H--> Git Prod (git fetch pour déploiement)
+Connexions git initiées PAR les serveurs cibles (pull model) :
+
+  Git+Ansible HP   --Clé B--> GitLab            (git fetch)
+  App Server(s) HP --Clé D--> Git+Ansible HP    (git fetch)
+  Git+Ansible Prod --Clé F--> Git+Ansible HP    (SSH check flag + git fetch)
+  App Server(s) Prod --Clé H--> Git+Ansible Prod (git fetch)
 
 Règles firewall minimales requises :
-  Orchestrateur  --> Git HP    : TCP/22
-  Orchestrateur  --> App HP    : TCP/22
-  Orchestrateur  --> Git Prod  : TCP/22
-  Orchestrateur  --> App Prod  : TCP/22
-  Git HP         --> GitLab    : TCP/22
-  Git Prod       --> Git HP    : TCP/22
-  App HP         --> Git HP    : TCP/22
-  App Prod       --> Git Prod  : TCP/22
+  Semaphore HP    --> Git+Ansible HP    : TCP/22
+  Semaphore HP    --> App HP            : TCP/22
+  Git+Ansible HP  --> GitLab            : TCP/22
+  App HP          --> Git+Ansible HP    : TCP/22
+  Semaphore Prod  --> Git+Ansible Prod  : TCP/22
+  Semaphore Prod  --> App Prod          : TCP/22
+  Git+Ansible Prod --> Git+Ansible HP   : TCP/22
+  App Prod        --> Git+Ansible Prod  : TCP/22
 
-Tout autre flux : BLOQUE
+Tout autre flux : BLOQUÉ
 ```
 
 ---
@@ -225,10 +316,13 @@ Tout autre flux : BLOQUE
 
 | Décision | Choix | Justification |
 |----------|-------|---------------|
-| Dépôts bare sur Git HP et Git Prod | `/opt/git/myapp.git` | Pas de working tree = pas de risque d'exécution accidentelle, usage pur miroir |
-| Working tree sur App HP et App Prod | `/opt/apps/myapp` | Le code s'exécute directement depuis le dépôt cloné |
-| La Prod ne connaît pas GitLab | Git Prod → Git HP uniquement | Isolation réseau stricte, la Prod ne peut pas aller chercher n'importe quoi |
+| 2 Semaphore indépendants | Un par zone | Isolation complète HP/Prod, un incident Prod n'affecte pas HP |
+| Git+Ansible combiné | Un seul serveur par zone | Simplifie la gestion des clés, le serveur git est aussi le control node |
+| Dépôts bare sur Git+Ansible | `/opt/git/<repo>.git` | Pas de working tree = pas de risque d'exécution accidentelle |
+| Flag de validation via git tag | `validated/hp/<repo>` | Mécanisme natif git, auditable, pas de dépendance externe |
+| Pull model exclusif | Toujours `git fetch`, jamais de push vers les cibles | La Production ne peut recevoir que ce que HP a validé |
+| Per-repo target lists | `app_servers_hp/prod` dans repos YAML | Flexibilité par application, pas de reconfiguration Ansible |
 | Fetch + Checkout (pas git pull) | `git fetch` puis `git checkout --force` | Aucun merge automatique, contrôle total sur la version déployée |
-| Tags Git pour le rollback | `v1.x.y` sémantique | Rollback déterministe vers n'importe quelle version antérieure |
-| 4 boutons séparés | Synchro et Deploy distincts | Validation intermédiaire entre chaque étape, pas de déploiement automatique |
-| Clés SSH read-only (F, G, H) | `command=git-upload-pack` dans `authorized_keys` | Même si une clé est compromise, impossible d'ouvrir un shell ou d'écrire |
+| Rolling deploy | `serial: 1` | Déploiement serveur par serveur, le parc reste partiellement disponible |
+| Clés SSH read-only (D, H) | `command="git-upload-pack ..."` dans `authorized_keys` | Même si compromises, impossible d'ouvrir un shell ou d'écrire |
+| Sauvegarde BDD avant Prod | `pg_dump -Fc` avant migration | Rollback possible si migration échoue en Production |

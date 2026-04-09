@@ -1,0 +1,268 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════════
+# SEMAPHORE HP — BOUTON 2 : Déployer HP
+# ═══════════════════════════════════════════════════════════════════════════════
+# Cible   : Serveurs applicatifs HP (liste définie dans repos/<repo_name>.yml)
+# Action  : Chaque serveur App HP fetche le code depuis Git+Ansible HP,
+#           puis exécute les étapes de déploiement (deps, migrations, reload).
+#
+# Survey Variable Semaphore :
+#   repo_name  (ex: myapp)  — obligatoire
+#
+# Flux :
+#   Semaphore HP --SSH(Clé A)--> Git+Ansible HP  [chargement config + add_host]
+#   Semaphore HP --SSH(Clé C)--> App HP servers
+#     App HP --git fetch(Clé D)--> Git+Ansible HP
+#     App HP : git checkout + deps + migrations + reload
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Play 1 : Charger la config et construire le groupe cible dynamique ────────
+- name: "[HP] Chargement configuration et construction du groupe cible"
+  hosts: git_ansible_hp
+  gather_facts: true
+  become: false
+
+  vars:
+    repo_config_file: "{{ playbook_dir }}/../../repos/{{ repo_name }}.yml"
+
+  tasks:
+    - name: "Vérifier que repo_name est fourni"
+      ansible.builtin.fail:
+        msg: "ERREUR : La variable 'repo_name' est obligatoire."
+      when: repo_name is not defined or repo_name | trim == ""
+
+    - name: "Charger la configuration du dépôt {{ repo_name }}"
+      ansible.builtin.include_vars:
+        file: "{{ repo_config_file }}"
+
+    - name: "Ajouter dynamiquement les serveurs HP cibles au groupe deploy_targets"
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups: deploy_targets_hp
+        repo_name: "{{ repo_name }}"
+        app_root: "{{ app_root }}"
+        app_type: "{{ app_type }}"
+        app_service_name: "{{ app_service_name }}"
+        git_remote_url: "deploy@{{ git_server_host }}:{{ git_bare_base | default('/opt/git') }}/{{ repo_name }}.git"
+        run_migrations: "{{ run_migrations | default(true) }}"
+      loop: "{{ app_servers_hp }}"
+
+    - name: "Serveurs HP ciblés pour ce déploiement"
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "  BOUTON 2 — DEPLOIEMENT HP"
+          - "  Dépôt      : {{ repo_name }}"
+          - "  App type   : {{ app_type }}"
+          - "  Cibles HP  : {{ app_servers_hp | join(', ') }}"
+          - "============================================================"
+
+# ─── Play 2 : Déploiement sur les serveurs App HP ─────────────────────────────
+- name: "[HP] Déploiement sur les serveurs applicatifs HP"
+  hosts: deploy_targets_hp
+  gather_facts: true
+  become: false
+  serial: 1    # Déploiement séquentiel serveur par serveur (rolling deploy)
+
+  pre_tasks:
+    - name: "--- [{{ inventory_hostname }}] Debut deploiement ---"
+      ansible.builtin.debug:
+        msg:
+          - "  Serveur    : {{ inventory_hostname }}"
+          - "  Dépôt      : {{ repo_name }}"
+          - "  Répertoire : {{ app_root }}"
+          - "  Source git : {{ git_remote_url }}"
+
+    - name: "Récupérer le commit actuellement déployé"
+      ansible.builtin.command:
+        cmd: git log --oneline -1
+        chdir: "{{ app_root }}"
+      register: commit_before
+      changed_when: false
+      failed_when: false
+
+    - name: "Commit actuel avant déploiement"
+      ansible.builtin.debug:
+        msg: "  Commit actuel : {{ commit_before.stdout | default('(aucun — premier déploiement)') }}"
+
+  tasks:
+    - name: "--- Etape 1/5 : Synchronisation du code depuis Git+Ansible HP ---"
+      block:
+        - name: "Créer le répertoire app si nécessaire"
+          ansible.builtin.file:
+            path: "{{ app_root }}"
+            state: directory
+            owner: "{{ app_user }}"
+            group: "{{ app_group }}"
+            mode: "0755"
+          become: true
+          become_user: root
+
+        - name: "Vérifier si le dépôt est initialisé"
+          ansible.builtin.stat:
+            path: "{{ app_root }}/.git"
+          register: git_dir
+
+        - name: "Clone initial depuis Git+Ansible HP"
+          ansible.builtin.command:
+            cmd: "git clone --origin origin {{ git_remote_url }} {{ app_root }}"
+          when: not git_dir.stat.exists
+          environment:
+            GIT_SSH_COMMAND: "ssh -i {{ git_ssh_key_path }} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+
+        - name: "git fetch depuis Git+Ansible HP"
+          ansible.builtin.command:
+            cmd: "git fetch origin --prune --tags --force"
+            chdir: "{{ app_root }}"
+          environment:
+            GIT_SSH_COMMAND: "ssh -i {{ git_ssh_key_path }} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+
+        - name: "git reset + checkout propre"
+          ansible.builtin.command:
+            cmd: "git checkout --force origin/{{ git_branch }}"
+            chdir: "{{ app_root }}"
+
+        - name: "Code synchronisé"
+          ansible.builtin.command:
+            cmd: git log --oneline -1
+            chdir: "{{ app_root }}"
+          register: commit_synced
+          changed_when: false
+
+        - name: "  [OK] Code synchronisé : {{ commit_synced.stdout }}"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 1/5 : Code synchronisé — {{ commit_synced.stdout }}"
+
+      rescue:
+        - name: "ERREUR synchronisation git"
+          ansible.builtin.fail:
+            msg: |
+              ERREUR Etape 1/5 : Synchronisation git échouée sur {{ inventory_hostname }}.
+              Vérifiez la Clé D et que Git+Ansible HP est accessible.
+
+    - name: "--- Etape 2/5 : Installation des dépendances ---"
+      block:
+        - name: "Installation dépendances PHP (Composer)"
+          ansible.builtin.command:
+            cmd: "{{ composer_path }} install {{ composer_args }}"
+            chdir: "{{ app_root }}"
+          environment:
+            HOME: "/home/{{ app_user }}"
+          when: app_type == "php"
+          register: composer_result
+          changed_when: "'Nothing to install' not in (composer_result.stdout | default(''))"
+
+        - name: "Installation dépendances Python (pip)"
+          ansible.builtin.pip:
+            requirements: "{{ app_root }}/requirements.txt"
+            virtualenv: "{{ python_venv_path | default(app_root + '/.venv') }}"
+          when: app_type == "python"
+
+        - name: "  [OK] Etape 2/5 : Dépendances installées"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 2/5 : Dépendances installées"
+
+      rescue:
+        - name: "ERREUR installation dépendances"
+          ansible.builtin.fail:
+            msg: "ERREUR Etape 2/5 : Installation des dépendances échouée sur {{ inventory_hostname }}."
+
+    - name: "--- Etape 3/5 : Migrations base de données ---"
+      block:
+        - name: "Migration PHP (artisan)"
+          ansible.builtin.command:
+            cmd: php artisan migrate --force
+            chdir: "{{ app_root }}"
+          when:
+            - app_type == "php"
+            - run_migrations | default(true)
+          register: migration_php
+          changed_when: "'Nothing to migrate' not in (migration_php.stdout | default(''))"
+
+        - name: "Migration Python (Django)"
+          ansible.builtin.command:
+            cmd: "{{ python_venv_path | default(app_root + '/.venv') }}/bin/python manage.py migrate"
+            chdir: "{{ app_root }}"
+          when:
+            - app_type == "python"
+            - run_migrations | default(true)
+
+        - name: "  [OK] Etape 3/5 : Migrations effectuées"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 3/5 : Migrations effectuées"
+
+      rescue:
+        - name: "ERREUR migrations"
+          ansible.builtin.fail:
+            msg: "ERREUR Etape 3/5 : Migration BDD échouée sur {{ inventory_hostname }}. Vérifiez les logs."
+
+    - name: "--- Etape 4/5 : Vidage et régénération du cache ---"
+      block:
+        - name: "Cache PHP (Laravel)"
+          ansible.builtin.command:
+            cmd: "php artisan config:cache && php artisan route:cache && php artisan view:cache"
+            chdir: "{{ app_root }}"
+          when:
+            - app_type == "php"
+            - clear_cache | default(true)
+
+        - name: "  [OK] Etape 4/5 : Cache régénéré"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 4/5 : Cache régénéré"
+
+    - name: "--- Etape 5/5 : Redémarrage du service ---"
+      block:
+        - name: "Redémarrer le service applicatif"
+          ansible.builtin.systemd:
+            name: "{{ app_service_name }}"
+            state: restarted
+            daemon_reload: true
+          become: true
+          become_user: root
+
+        - name: "Attendre stabilisation"
+          ansible.builtin.pause:
+            seconds: 3
+
+        - name: "Vérifier que le service est actif"
+          ansible.builtin.systemd:
+            name: "{{ app_service_name }}"
+          register: service_status
+          become: true
+          become_user: root
+          failed_when: service_status.status.ActiveState != "active"
+
+        - name: "  [OK] Etape 5/5 : Service actif"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 5/5 : Service {{ app_service_name }} — ACTIF"
+
+      rescue:
+        - name: "ERREUR service non démarré"
+          ansible.builtin.fail:
+            msg: |
+              ERREUR Etape 5/5 : Le service {{ app_service_name }} n'a pas démarré.
+              Vérifiez les logs : journalctl -u {{ app_service_name }} -n 50
+
+  post_tasks:
+    - name: "Résumé déploiement {{ inventory_hostname }}"
+      ansible.builtin.debug:
+        msg:
+          - "  ✓ {{ inventory_hostname }} — DEPLOIEMENT OK"
+          - "  Commit : {{ commit_synced.stdout }}"
+          - "  Service : {{ app_service_name }} ACTIF"
+
+# ─── Play 3 : Résumé global ────────────────────────────────────────────────────
+- name: "[HP] Résumé global du déploiement"
+  hosts: git_ansible_hp
+  gather_facts: false
+
+  tasks:
+    - name: "Résumé final"
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "  DEPLOIEMENT HP TERMINE"
+          - "  Dépôt   : {{ repo_name }}"
+          - "  Prochaine etape : Bouton 3 — Valider le déploiement HP"
+          - "  (requis avant de lancer la synchro en Production)"
+          - "============================================================"

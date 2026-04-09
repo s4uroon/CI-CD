@@ -30,19 +30,33 @@
   register: bare_head
 
 - name: "[bare] Initialiser le dépôt bare (premier déploiement)"
-  ansible.builtin.command:
-    cmd: "git clone --bare --origin {{ git_remote_name }} {{ git_remote_url }} {{ git_bare_root }}"
-  when:
-    - not bare_head.stat.exists
-    - git_init_if_missing | default(true)
-  environment:
-    GIT_SSH_COMMAND: "ssh -i {{ git_ssh_key_path }} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
-  register: clone_bare_result
+  block:
+    - name: "[bare] Clone bare initial depuis la source"
+      ansible.builtin.command:
+        cmd: "git clone --bare --origin {{ git_remote_name }} {{ git_remote_url }} {{ git_bare_root }}"
+      when:
+        - not bare_head.stat.exists
+        - git_init_if_missing | default(true)
+      environment:
+        GIT_SSH_COMMAND: "ssh -i {{ git_ssh_key_path }} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+      register: clone_bare_result
 
-- name: "[bare] Afficher le résultat du clone bare"
-  ansible.builtin.debug:
-    var: clone_bare_result.stderr_lines
-  when: clone_bare_result is defined and clone_bare_result.changed
+    - name: "[bare] [OK] Dépôt bare initialisé"
+      ansible.builtin.debug:
+        msg: "  [OK] Dépôt bare créé : {{ git_bare_root }}"
+      when: clone_bare_result is defined and clone_bare_result.changed
+
+  rescue:
+    - name: "[bare] ERREUR initialisation du dépôt bare"
+      ansible.builtin.fail:
+        msg: |
+          ERREUR : Impossible d'initialiser le dépôt bare {{ git_bare_root }}.
+          Source   : {{ git_remote_url }}
+          Clé SSH  : {{ git_ssh_key_path }}
+          Actions  :
+            - Vérifiez que la clé SSH est correcte et autorisée sur la source
+            - Vérifiez la connectivité réseau vers {{ git_remote_url }}
+            - Vérifiez les permissions sur {{ git_bare_root }}
 
 # ─── 3. Vérifier et corriger l'URL du remote ──────────────────────────────────
 
@@ -70,19 +84,62 @@
 
 # ─── 4. Fetch : mise à jour du miroir ─────────────────────────────────────────
 
-- name: "[bare] git fetch --all (mise à jour du miroir)"
+- name: "[bare] Récupérer le commit avant fetch"
   ansible.builtin.command:
-    cmd: "git fetch {{ git_remote_name }} --prune --tags --force"
+    cmd: "git log {{ git_remote_name }}/{{ git_branch }} --format='%H' -1"
     chdir: "{{ git_bare_root }}"
-  environment:
-    GIT_SSH_COMMAND: "ssh -i {{ git_ssh_key_path }} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
-  register: fetch_result
+  register: commit_before_fetch
+  changed_when: false
+  failed_when: false
 
-- name: "[bare] Afficher les objets récupérés"
-  ansible.builtin.debug:
-    msg: "{{ fetch_result.stderr_lines | default([]) + fetch_result.stdout_lines | default([]) }}"
+- name: "[bare] git fetch (mise à jour du miroir)"
+  block:
+    - name: "[bare] Exécuter git fetch"
+      ansible.builtin.command:
+        cmd: "git fetch {{ git_remote_name }} --prune --tags --force"
+        chdir: "{{ git_bare_root }}"
+      environment:
+        GIT_SSH_COMMAND: "ssh -i {{ git_ssh_key_path }} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+      register: fetch_result
+
+  rescue:
+    - name: "[bare] ERREUR git fetch"
+      ansible.builtin.fail:
+        msg: |
+          ERREUR : Le fetch depuis {{ git_remote_url }} a échoué.
+          Clé SSH  : {{ git_ssh_key_path }}
+          Détail   : {{ fetch_result.stderr | default('erreur inconnue') }}
+          Actions  :
+            - Vérifiez que la clé SSH est autorisée sur le serveur source
+            - Vérifiez la connectivité réseau
+            - Vérifiez que l'URL du remote est correcte : {{ git_remote_url }}
 
 # ─── 5. Vérification post-fetch ───────────────────────────────────────────────
+
+- name: "[bare] Récupérer le commit après fetch"
+  ansible.builtin.command:
+    cmd: "git log {{ git_remote_name }}/{{ git_branch }} --format='%H' -1"
+    chdir: "{{ git_bare_root }}"
+  register: commit_after_fetch
+  changed_when: false
+  failed_when: false
+
+- name: "[bare] [OK] Dépôt déjà à jour"
+  ansible.builtin.debug:
+    msg:
+      - "  [OK] Miroir déjà à jour — aucun nouveau commit"
+      - "  Commit : {{ commit_after_fetch.stdout | default('N/A') }}"
+  when:
+    - bare_head.stat.exists
+    - commit_before_fetch.stdout == commit_after_fetch.stdout
+
+- name: "[bare] [OK] Nouveaux commits récupérés"
+  ansible.builtin.debug:
+    msg:
+      - "  [OK] Nouveaux commits récupérés depuis la source"
+      - "  Avant  : {{ commit_before_fetch.stdout | default('(premier fetch)') }}"
+      - "  Après  : {{ commit_after_fetch.stdout | default('N/A') }}"
+  when: not bare_head.stat.exists or commit_before_fetch.stdout != commit_after_fetch.stdout
 
 - name: "[bare] Lister les branches disponibles dans le miroir"
   ansible.builtin.command:
@@ -91,18 +148,6 @@
   register: branches_result
   changed_when: false
 
-- name: "[bare] Afficher les branches du miroir"
+- name: "[bare] Branches disponibles"
   ansible.builtin.debug:
-    var: branches_result.stdout_lines
-
-- name: "[bare] Récupérer le dernier commit de la branche cible"
-  ansible.builtin.command:
-    cmd: "git log {{ git_remote_name }}/{{ git_branch }} --oneline -1"
-    chdir: "{{ git_bare_root }}"
-  register: latest_commit
-  changed_when: false
-  failed_when: false
-
-- name: "[bare] Afficher le dernier commit disponible"
-  ansible.builtin.debug:
-    msg: "Dernier commit sur {{ git_branch }} : {{ latest_commit.stdout | default('N/A') }}"
+    msg: "{{ branches_result.stdout_lines }}"

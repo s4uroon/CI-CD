@@ -1,0 +1,15 @@
+---
+# Variables — Serveur Git+Ansible Prod
+# Ce serveur héberge les dépôts bare et a Ansible installé
+
+# Répertoire racine des dépôts bare
+git_bare_base: /opt/git
+
+# Remote utilisé pour fetcher depuis Git+Ansible HP
+git_remote_name: origin
+
+# Clé SSH que CE SERVEUR utilise pour se connecter au Git+Ansible HP (Clé F)
+git_ssh_key_path: "/home/{{ app_user }}/.ssh/id_gitansibledprod_gitansiblehp"
+
+# Alias SSH pour Git+Ansible HP (défini dans ~/.ssh/config sur ce serveur)
+git_hp_ssh_host: git-ansible-hp
