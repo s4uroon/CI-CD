@@ -1,0 +1,334 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════════
+# SEMAPHORE PROD — BOUTON 2 : Déployer Prod
+# ═══════════════════════════════════════════════════════════════════════════════
+# Cible   : Serveurs applicatifs Prod (liste définie dans repos/<repo_name>.yml)
+# Action  : Sauvegarde BDD, chaque serveur App Prod fetche le code depuis
+#           Git+Ansible Prod, puis déploie (deps, migrations, reload).
+#
+# Survey Variable Semaphore :
+#   repo_name  (ex: myapp)  — obligatoire
+#
+# Flux :
+#   Semaphore Prod --SSH(Clé E)--> Git+Ansible Prod  [config + add_host]
+#   Semaphore Prod --SSH(Clé G)--> App Prod servers
+#     App Prod --git fetch(Clé H)--> Git+Ansible Prod
+#     App Prod : git checkout + sauvegarde BDD + deps + migrations + reload
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Play 1 : Charger la config et construire le groupe cible ──────────────────
+- name: "[PROD] Chargement configuration et construction du groupe cible"
+  hosts: git_ansible_prod
+  gather_facts: true
+  become: false
+
+  vars:
+    repo_config_file: "{{ playbook_dir }}/../../repos/{{ repo_name }}.yml"
+
+  tasks:
+    - name: "Vérifier que repo_name est fourni"
+      ansible.builtin.fail:
+        msg: "ERREUR : La variable 'repo_name' est obligatoire."
+      when: repo_name is not defined or repo_name | trim == ""
+
+    - name: "Charger la configuration du dépôt {{ repo_name }}"
+      ansible.builtin.include_vars:
+        file: "{{ repo_config_file }}"
+
+    - name: "Ajouter dynamiquement les serveurs Prod cibles"
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups: deploy_targets_prod
+        repo_name: "{{ repo_name }}"
+        app_root: "{{ app_root }}"
+        app_type: "{{ app_type }}"
+        app_service_name: "{{ app_service_name }}"
+        git_remote_url: "deploy@{{ git_server_host }}:{{ git_bare_base | default('/opt/git') }}/{{ repo_name }}.git"
+        run_migrations: "{{ run_migrations | default(true) }}"
+        db_host: "{{ db_host_prod | default('localhost') }}"
+        db_name: "{{ db_name_prod | default(repo_name + '_prod') }}"
+        db_user: "{{ db_user_prod | default('app_user') }}"
+      loop: "{{ app_servers_prod }}"
+
+    - name: "Résumé du déploiement planifié"
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "  BOUTON 2 PROD — DEPLOIEMENT PRODUCTION"
+          - "  Dépôt      : {{ repo_name }}"
+          - "  App type   : {{ app_type }}"
+          - "  Cibles     : {{ app_servers_prod | join(', ') }}"
+          - "============================================================"
+
+# ─── Play 2 : Déploiement sur les serveurs App Prod ───────────────────────────
+- name: "[PROD] Déploiement sur les serveurs applicatifs Prod"
+  hosts: deploy_targets_prod
+  gather_facts: true
+  become: false
+  serial: 1    # Déploiement séquentiel (rolling deploy)
+
+  pre_tasks:
+    - name: "--- [{{ inventory_hostname }}] Debut deploiement Production ---"
+      ansible.builtin.debug:
+        msg:
+          - "  Serveur    : {{ inventory_hostname }}"
+          - "  Dépôt      : {{ repo_name }}"
+          - "  Répertoire : {{ app_root }}"
+
+    - name: "Récupérer le commit actuellement déployé"
+      ansible.builtin.command:
+        cmd: git log --oneline -1
+        chdir: "{{ app_root }}"
+      register: commit_before
+      changed_when: false
+      failed_when: false
+
+    - name: "Récupérer le tag courant"
+      ansible.builtin.command:
+        cmd: git describe --tags --exact-match HEAD
+        chdir: "{{ app_root }}"
+      register: current_tag
+      changed_when: false
+      failed_when: false
+
+    - name: "Etat avant déploiement"
+      ansible.builtin.debug:
+        msg:
+          - "  Commit actuel : {{ commit_before.stdout | default('(premier déploiement)') }}"
+          - "  Tag actuel    : {{ current_tag.stdout | default('(aucun tag)') }}"
+
+    - name: "Créer le répertoire de sauvegarde BDD"
+      ansible.builtin.file:
+        path: "{{ db_backup_dir | default('/opt/backups') }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0750"
+      become: true
+      become_user: root
+
+  tasks:
+    - name: "--- Etape 0/6 : Sauvegarde BDD avant déploiement ---"
+      block:
+        - name: "Dump PostgreSQL avant déploiement"
+          ansible.builtin.command:
+            cmd: >
+              pg_dump -Fc -d {{ db_name }}
+              -f {{ db_backup_dir | default('/opt/backups') }}/{{ repo_name }}_prod_{{ ansible_date_time.date }}_{{ ansible_date_time.time | replace(':', '-') }}.dump
+          environment:
+            PGUSER: "{{ db_user }}"
+            PGHOST: "{{ db_host }}"
+          when:
+            - app_type != "static"
+            - db_backup_before_migration | default(true)
+          changed_when: true
+
+        - name: "  [OK] Etape 0/6 : Sauvegarde BDD créée"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 0/6 : Dump BDD sauvegardé dans {{ db_backup_dir | default('/opt/backups') }}"
+          when:
+            - app_type != "static"
+            - db_backup_before_migration | default(true)
+
+        - name: "Tag git de sauvegarde avant déploiement"
+          ansible.builtin.command:
+            cmd: >
+              git tag -f "backup/prod-pre-deploy-{{ ansible_date_time.date }}-{{ ansible_date_time.time | replace(':', '-') }}"
+            chdir: "{{ app_root }}"
+          changed_when: true
+          failed_when: false
+
+    - name: "--- Etape 1/6 : Synchronisation du code depuis Git+Ansible Prod ---"
+      block:
+        - name: "Créer le répertoire app si nécessaire"
+          ansible.builtin.file:
+            path: "{{ app_root }}"
+            state: directory
+            owner: "{{ app_user }}"
+            group: "{{ app_group }}"
+            mode: "0755"
+          become: true
+          become_user: root
+
+        - name: "Vérifier si le dépôt est initialisé"
+          ansible.builtin.stat:
+            path: "{{ app_root }}/.git"
+          register: git_dir
+
+        - name: "Clone initial depuis Git+Ansible Prod"
+          ansible.builtin.command:
+            cmd: "git clone --origin origin {{ git_remote_url }} {{ app_root }}"
+          when: not git_dir.stat.exists
+          environment:
+            GIT_SSH_COMMAND: "ssh -i {{ git_ssh_key_path }} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+
+        - name: "git fetch depuis Git+Ansible Prod"
+          ansible.builtin.command:
+            cmd: "git fetch origin --prune --tags --force"
+            chdir: "{{ app_root }}"
+          environment:
+            GIT_SSH_COMMAND: "ssh -i {{ git_ssh_key_path }} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+
+        - name: "git checkout propre"
+          ansible.builtin.command:
+            cmd: "git checkout --force origin/{{ git_branch }}"
+            chdir: "{{ app_root }}"
+
+        - name: "Commit déployé"
+          ansible.builtin.command:
+            cmd: git log --oneline -1
+            chdir: "{{ app_root }}"
+          register: commit_deployed
+          changed_when: false
+
+        - name: "  [OK] Etape 1/6 : Code synchronisé — {{ commit_deployed.stdout }}"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 1/6 : Code synchronisé — {{ commit_deployed.stdout }}"
+
+      rescue:
+        - name: "ERREUR synchronisation git"
+          ansible.builtin.fail:
+            msg: "ERREUR Etape 1/6 : Synchronisation git échouée. Vérifiez la Clé H."
+
+    - name: "--- Etape 2/6 : Installation des dépendances ---"
+      block:
+        - name: "Composer (PHP)"
+          ansible.builtin.command:
+            cmd: "{{ composer_path }} install {{ composer_args }}"
+            chdir: "{{ app_root }}"
+          environment:
+            HOME: "/home/{{ app_user }}"
+          when: app_type == "php"
+
+        - name: "pip (Python)"
+          ansible.builtin.pip:
+            requirements: "{{ app_root }}/requirements.txt"
+            virtualenv: "{{ python_venv_path | default(app_root + '/.venv') }}"
+          when: app_type == "python"
+
+        - name: "  [OK] Etape 2/6 : Dépendances installées"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 2/6 : Dépendances installées"
+
+    - name: "--- Etape 3/6 : Migrations base de données ---"
+      block:
+        - name: "Migration PHP"
+          ansible.builtin.command:
+            cmd: php artisan migrate --force
+            chdir: "{{ app_root }}"
+          when:
+            - app_type == "php"
+            - run_migrations | default(true)
+
+        - name: "Migration Python"
+          ansible.builtin.command:
+            cmd: "{{ python_venv_path | default(app_root + '/.venv') }}/bin/python manage.py migrate"
+            chdir: "{{ app_root }}"
+          when:
+            - app_type == "python"
+            - run_migrations | default(true)
+
+        - name: "  [OK] Etape 3/6 : Migrations effectuées"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 3/6 : Migrations effectuées"
+
+      rescue:
+        - name: "ERREUR migrations — rollback possible"
+          ansible.builtin.fail:
+            msg: |
+              ERREUR Etape 3/6 : Migration BDD échouée.
+              Une sauvegarde BDD a été créée dans {{ db_backup_dir | default('/opt/backups') }}
+              avant ce déploiement. Restaurez-la si nécessaire.
+
+    - name: "--- Etape 4/6 : Vidage et régénération du cache ---"
+      block:
+        - name: "Cache PHP"
+          ansible.builtin.command:
+            cmd: "php artisan config:cache && php artisan route:cache && php artisan view:cache"
+            chdir: "{{ app_root }}"
+          when:
+            - app_type == "php"
+            - clear_cache | default(true)
+
+        - name: "  [OK] Etape 4/6 : Cache régénéré"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 4/6 : Cache régénéré"
+
+    - name: "--- Etape 5/6 : Redémarrage du service ---"
+      block:
+        - name: "Redémarrer le service"
+          ansible.builtin.systemd:
+            name: "{{ app_service_name }}"
+            state: restarted
+            daemon_reload: true
+          become: true
+          become_user: root
+
+        - name: "Attendre stabilisation"
+          ansible.builtin.pause:
+            seconds: 5
+
+        - name: "Vérifier que le service est actif"
+          ansible.builtin.systemd:
+            name: "{{ app_service_name }}"
+          register: service_status
+          become: true
+          become_user: root
+          failed_when: service_status.status.ActiveState != "active"
+
+        - name: "  [OK] Etape 5/6 : Service actif"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 5/6 : Service {{ app_service_name }} — ACTIF"
+
+      rescue:
+        - name: "ERREUR service non démarré"
+          ansible.builtin.fail:
+            msg: |
+              ERREUR Etape 5/6 : Le service {{ app_service_name }} n'a pas démarré.
+              Une sauvegarde est disponible dans {{ db_backup_dir | default('/opt/backups') }}
+              Commande : journalctl -u {{ app_service_name }} -n 50
+
+    - name: "--- Etape 6/6 : Vérification santé ---"
+      block:
+        - name: "Health check HTTP"
+          ansible.builtin.uri:
+            url: "http://localhost/health"
+            method: GET
+            status_code: 200
+            timeout: 10
+          register: health_check
+          failed_when: false
+          changed_when: false
+
+        - name: "Health check OK"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 6/6 : Health check HTTP — status {{ health_check.status }}"
+          when: health_check.status | default(0) == 200
+
+        - name: "Health check échoué (avertissement)"
+          ansible.builtin.debug:
+            msg: "  [WARN] Etape 6/6 : Health check HTTP status {{ health_check.status | default('N/A') }} — vérifiez l'application"
+          when: health_check.status | default(0) != 200
+
+  post_tasks:
+    - name: "Résumé {{ inventory_hostname }}"
+      ansible.builtin.debug:
+        msg:
+          - "  ✓ {{ inventory_hostname }} — DEPLOIEMENT PROD OK"
+          - "  Commit  : {{ commit_deployed.stdout | default('N/A') }}"
+          - "  Service : {{ app_service_name }} ACTIF"
+
+# ─── Play 3 : Résumé global ────────────────────────────────────────────────────
+- name: "[PROD] Résumé global"
+  hosts: git_ansible_prod
+  gather_facts: false
+
+  tasks:
+    - name: "Résumé final"
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "  DEPLOIEMENT PRODUCTION TERMINE"
+          - "  Dépôt   : {{ repo_name }}"
+          - "  En cas de problème : consultez docs/rollback-strategy.md"
+          - "============================================================"

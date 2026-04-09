@@ -1,0 +1,241 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════════
+# SEMAPHORE PROD — BOUTON 1 : Synchro Git Prod
+# ═══════════════════════════════════════════════════════════════════════════════
+# Cible   : Serveur Git+Ansible Prod
+# Action  : Vérifie le flag de validation HP, puis fetche le dépôt depuis
+#           Git+Ansible HP. Affiche le résultat à chaque étape.
+#
+# PREREQUIS : Le Bouton 3 de Semaphore HP doit avoir été exécuté.
+#             Le tag "validated/hp/<repo_name>" doit exister sur Git+Ansible HP.
+#
+# Survey Variable Semaphore :
+#   repo_name  (ex: myapp)  — obligatoire
+#
+# Flux :
+#   Semaphore Prod --SSH(Clé E)--> Git+Ansible Prod
+#     vérifie tag via SSH sur Git+Ansible HP (Clé F)
+#     --git fetch(Clé F)--> Git+Ansible HP
+# ═══════════════════════════════════════════════════════════════════════════════
+
+- name: "[PROD] Synchro Git Prod <- Git+Ansible HP"
+  hosts: git_ansible_prod
+  gather_facts: true
+  become: false
+
+  vars:
+    repo_config_file: "{{ playbook_dir }}/../../repos/{{ repo_name }}.yml"
+    validation_tag: "validated/hp/{{ repo_name }}"
+
+  pre_tasks:
+    - name: "Vérifier que repo_name est fourni"
+      ansible.builtin.fail:
+        msg: "ERREUR : La variable 'repo_name' est obligatoire."
+      when: repo_name is not defined or repo_name | trim == ""
+
+    - name: "Charger la configuration du dépôt {{ repo_name }}"
+      ansible.builtin.include_vars:
+        file: "{{ repo_config_file }}"
+
+    - name: "Début Synchro Git Prod"
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "  BOUTON 1 PROD — SYNCHRO GIT PROD"
+          - "  Dépôt   : {{ repo_name }}"
+          - "  Serveur : {{ inventory_hostname }}"
+          - "  Source  : Git+Ansible HP ({{ git_hp_ssh_host }})"
+          - "============================================================"
+
+  tasks:
+    - name: "--- Etape 1/4 : Vérification du flag de validation HP ---"
+      block:
+        - name: "Interroger Git+Ansible HP pour le flag de validation"
+          ansible.builtin.command:
+            cmd: >
+              ssh -i {{ git_ssh_key_path }}
+                  -o BatchMode=yes
+                  -o ConnectTimeout=10
+                  -o StrictHostKeyChecking=accept-new
+                  deploy@{{ git_hp_ssh_host }}
+                  "git -C /opt/git/{{ repo_name }}.git tag -l '{{ validation_tag }}'"
+          register: flag_check
+          changed_when: false
+
+        - name: "BLOQUE : Flag de validation HP absent"
+          ansible.builtin.fail:
+            msg: |
+              BLOQUE : Aucun flag de validation HP trouvé pour {{ repo_name }}.
+
+              Actions requises sur Semaphore HP :
+                1. Bouton 1 — Synchro Git HP    (si pas encore fait)
+                2. Bouton 2 — Deployer HP        (déployer en recette)
+                3. Bouton 3 — Valider HP         (valider après tests)
+
+              Ensuite relancez ce bouton.
+          when: flag_check.stdout | trim == ""
+
+        - name: "Récupérer le commit validé en HP"
+          ansible.builtin.command:
+            cmd: >
+              ssh -i {{ git_ssh_key_path }}
+                  -o BatchMode=yes
+                  -o StrictHostKeyChecking=accept-new
+                  deploy@{{ git_hp_ssh_host }}
+                  "git -C /opt/git/{{ repo_name }}.git rev-parse '{{ validation_tag }}'"
+          register: validated_commit
+          changed_when: false
+
+        - name: "Récupérer le message du commit validé"
+          ansible.builtin.command:
+            cmd: >
+              ssh -i {{ git_ssh_key_path }}
+                  -o BatchMode=yes
+                  -o StrictHostKeyChecking=accept-new
+                  deploy@{{ git_hp_ssh_host }}
+                  "git -C /opt/git/{{ repo_name }}.git log '{{ validation_tag }}' --format='%s (%an, %ar)' -1"
+          register: validated_commit_msg
+          changed_when: false
+
+        - name: "Flag de validation HP présent"
+          ansible.builtin.debug:
+            msg:
+              - "  [OK] Flag de validation HP présent"
+              - "  Tag     : {{ validation_tag }}"
+              - "  Commit  : {{ validated_commit.stdout }}"
+              - "  Message : {{ validated_commit_msg.stdout }}"
+
+      rescue:
+        - name: "ERREUR vérification flag HP"
+          ansible.builtin.fail:
+            msg: |
+              ERREUR Etape 1/4 : Impossible de vérifier le flag HP sur Git+Ansible HP.
+              Hôte  : {{ git_hp_ssh_host }}
+              Clé   : {{ git_ssh_key_path }}
+              Vérifiez la connectivité et la Clé F.
+
+    - name: "--- Etape 2/4 : Vérification connectivité Git+Ansible HP ---"
+      block:
+        - name: "Test SSH vers Git+Ansible HP (git)"
+          ansible.builtin.command:
+            cmd: >
+              ssh -i {{ git_ssh_key_path }}
+                  -o BatchMode=yes
+                  -o ConnectTimeout=10
+                  -o StrictHostKeyChecking=accept-new
+                  deploy@{{ git_hp_ssh_host }}
+                  "echo connexion_ok"
+          register: ssh_hp_test
+          changed_when: false
+
+        - name: "  [OK] Git+Ansible HP accessible"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 2/4 : Git+Ansible HP accessible via SSH"
+
+    - name: "--- Etape 3/4 : Initialisation ou fetch du miroir bare Prod ---"
+      block:
+        - name: "Créer le répertoire bare si nécessaire"
+          ansible.builtin.file:
+            path: "{{ git_bare_base }}/{{ repo_name }}.git"
+            state: directory
+            owner: "{{ app_user }}"
+            group: "{{ app_group }}"
+            mode: "0755"
+          become: true
+          become_user: root
+
+        - name: "Vérifier si le dépôt bare Prod est initialisé"
+          ansible.builtin.stat:
+            path: "{{ git_bare_base }}/{{ repo_name }}.git/HEAD"
+          register: bare_prod_exists
+
+        - name: "Clone bare initial depuis Git+Ansible HP"
+          ansible.builtin.command:
+            cmd: >
+              git clone --bare --origin origin
+              deploy@{{ git_hp_ssh_host }}:{{ git_bare_base }}/{{ repo_name }}.git
+              {{ git_bare_base }}/{{ repo_name }}.git
+          when: not bare_prod_exists.stat.exists
+          environment:
+            GIT_SSH_COMMAND: "ssh -i {{ git_ssh_key_path }} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+
+        - name: "Commit avant fetch (si dépôt existant)"
+          ansible.builtin.command:
+            cmd: "git log origin/{{ git_branch }} --format='%H' -1"
+            chdir: "{{ git_bare_base }}/{{ repo_name }}.git"
+          register: commit_before_prod
+          changed_when: false
+          failed_when: false
+          when: bare_prod_exists.stat.exists
+
+        - name: "git fetch depuis Git+Ansible HP"
+          ansible.builtin.command:
+            cmd: "git fetch origin --prune --tags --force"
+            chdir: "{{ git_bare_base }}/{{ repo_name }}.git"
+          environment:
+            GIT_SSH_COMMAND: "ssh -i {{ git_ssh_key_path }} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+          register: fetch_prod_result
+
+        - name: "Commit après fetch"
+          ansible.builtin.command:
+            cmd: "git log origin/{{ git_branch }} --format='%H' -1"
+            chdir: "{{ git_bare_base }}/{{ repo_name }}.git"
+          register: commit_after_prod
+          changed_when: false
+
+        - name: "Dépôt Prod déjà à jour"
+          ansible.builtin.debug:
+            msg:
+              - "  [INFO] Le dépôt Prod est déjà à jour"
+              - "  Commit : {{ commit_after_prod.stdout }}"
+          when:
+            - bare_prod_exists.stat.exists
+            - commit_before_prod.stdout == commit_after_prod.stdout
+
+        - name: "Nouveaux commits récupérés"
+          ansible.builtin.debug:
+            msg:
+              - "  [OK] Etape 3/4 : Nouveaux commits récupérés depuis Git+Ansible HP"
+              - "  Avant  : {{ commit_before_prod.stdout | default('(premier fetch)') }}"
+              - "  Après  : {{ commit_after_prod.stdout }}"
+          when: not bare_prod_exists.stat.exists or commit_before_prod.stdout != commit_after_prod.stdout
+
+      rescue:
+        - name: "ERREUR fetch depuis Git+Ansible HP"
+          ansible.builtin.fail:
+            msg: |
+              ERREUR Etape 3/4 : Le fetch depuis Git+Ansible HP a échoué.
+              Vérifiez la Clé F et que Git+Ansible HP est accessible.
+
+    - name: "--- Etape 4/4 : Vérification cohérence commit HP vs Prod ---"
+      block:
+        - name: "Comparer le commit validé HP avec le commit Prod"
+          ansible.builtin.debug:
+            msg:
+              - "  Commit validé HP   : {{ validated_commit.stdout }}"
+              - "  Commit miroir Prod : {{ commit_after_prod.stdout }}"
+
+        - name: "Avertir si commits différents"
+          ansible.builtin.debug:
+            msg: |
+              AVERTISSEMENT : Le commit en Prod est différent du commit validé HP.
+              Cela est normal si de nouveaux commits ont été poussés sur GitLab
+              depuis la validation HP. Vérifiez avant de déployer.
+          when: validated_commit.stdout != commit_after_prod.stdout
+
+        - name: "Commits identiques"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 4/4 : Commit Prod identique au commit validé HP"
+          when: validated_commit.stdout == commit_after_prod.stdout
+
+  post_tasks:
+    - name: "Résumé final"
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "  SYNCHRO GIT PROD TERMINEE"
+          - "  Dépôt       : {{ repo_name }}"
+          - "  Miroir Prod : {{ git_bare_base }}/{{ repo_name }}.git"
+          - "  Commit      : {{ commit_after_prod.stdout }}"
+          - "  Prochaine etape : Bouton 2 PROD — Deployer Prod"
+          - "============================================================"

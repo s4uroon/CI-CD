@@ -1,0 +1,202 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════════
+# SEMAPHORE HP — BOUTON 1 : Synchro Git HP
+# ═══════════════════════════════════════════════════════════════════════════════
+# Cible   : Serveur Git+Ansible HP
+# Action  : Le serveur Git+Ansible HP fetche le dépôt depuis GitLab Central.
+#           Affiche chaque étape avec résultat visuel (OK / ERREUR).
+#
+# Survey Variable Semaphore :
+#   repo_name  (ex: myapp)  — obligatoire
+#
+# Flux :
+#   Semaphore HP --SSH(Clé A)--> Git+Ansible HP --git fetch(Clé B)--> GitLab
+# ═══════════════════════════════════════════════════════════════════════════════
+
+- name: "[HP] Synchro Git HP <- GitLab"
+  hosts: git_ansible_hp
+  gather_facts: true
+  become: false
+
+  vars:
+    repo_config_file: "{{ playbook_dir }}/../../repos/{{ repo_name }}.yml"
+
+  pre_tasks:
+    - name: ">>> DEBUT : Synchro Git HP | repo={{ repo_name }}"
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "  BOUTON 1 — SYNCHRO GIT HP"
+          - "  Dépôt     : {{ repo_name }}"
+          - "  Serveur   : {{ inventory_hostname }}"
+          - "  Heure     : {{ ansible_date_time.iso8601 }}"
+          - "============================================================"
+
+    - name: "Vérifier que repo_name est fourni"
+      ansible.builtin.fail:
+        msg: "ERREUR : La variable 'repo_name' est obligatoire. Définissez-la dans le formulaire Semaphore."
+      when: repo_name is not defined or repo_name | trim == ""
+
+    - name: "Charger la configuration du dépôt ({{ repo_name }})"
+      ansible.builtin.include_vars:
+        file: "{{ repo_config_file }}"
+      register: repo_load
+      failed_when: false
+
+    - name: "Vérifier que le fichier de config existe"
+      ansible.builtin.fail:
+        msg: "ERREUR : Fichier de configuration introuvable : ansible/repos/{{ repo_name }}.yml"
+      when: repo_load is failed
+
+    - name: "Config chargée OK"
+      ansible.builtin.debug:
+        msg:
+          - "  Config    : ansible/repos/{{ repo_name }}.yml [OK]"
+          - "  Source    : {{ git_remote_url }}"
+          - "  Branche   : {{ git_branch }}"
+
+  tasks:
+    - name: "Vérifier que le répertoire bare existe"
+      ansible.builtin.file:
+        path: "{{ git_bare_base }}/{{ repo_name }}.git"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0755"
+      become: true
+      become_user: root
+
+    - name: "Vérifier si le dépôt bare est déjà initialisé"
+      ansible.builtin.stat:
+        path: "{{ git_bare_base }}/{{ repo_name }}.git/HEAD"
+      register: bare_initialized
+
+    - name: "--- Etape 1/4 : Test de connectivité SSH vers GitLab ---"
+      block:
+        - name: "Test SSH GitLab"
+          ansible.builtin.command:
+            cmd: >
+              ssh -i {{ git_ssh_key_path }}
+                  -o BatchMode=yes
+                  -o ConnectTimeout=10
+                  -o StrictHostKeyChecking=accept-new
+                  git@{{ gitlab_ssh_host }}
+          register: ssh_gitlab_test
+          changed_when: false
+          failed_when: false
+
+        - name: "Résultat test SSH GitLab"
+          ansible.builtin.debug:
+            msg: "  [OK] GitLab accessible — authentification SSH valide"
+          when: ssh_gitlab_test.rc == 0 or 'Welcome' in (ssh_gitlab_test.stderr | default(''))
+
+        - name: "Echouer si GitLab inaccessible"
+          ansible.builtin.fail:
+            msg: |
+              ERREUR : Impossible de joindre GitLab via SSH.
+              Hôte    : {{ gitlab_ssh_host }}
+              Clé SSH : {{ git_ssh_key_path }}
+              Détail  : {{ ssh_gitlab_test.stderr | default('timeout ou connexion refusée') }}
+              Actions : Vérifiez la Clé B et la connectivité réseau vers GitLab.
+          when:
+            - ssh_gitlab_test.rc != 0
+            - "'Welcome' not in (ssh_gitlab_test.stderr | default(''))"
+
+    - name: "--- Etape 2/4 : Initialisation du dépôt bare (si nécessaire) ---"
+      block:
+        - name: "Clone bare initial depuis GitLab"
+          ansible.builtin.command:
+            cmd: >
+              git clone --bare --origin origin
+              {{ git_remote_url }}
+              {{ git_bare_base }}/{{ repo_name }}.git
+          when: not bare_initialized.stat.exists
+          environment:
+            GIT_SSH_COMMAND: "ssh -i {{ git_ssh_key_path }} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+          register: clone_result
+
+        - name: "Clone bare effectué"
+          ansible.builtin.debug:
+            msg: "  [OK] Dépôt bare initialisé : {{ git_bare_base }}/{{ repo_name }}.git"
+          when: clone_result is defined and clone_result.changed
+
+        - name: "Dépôt bare déjà existant"
+          ansible.builtin.debug:
+            msg: "  [OK] Dépôt bare existant — passage au fetch"
+          when: bare_initialized.stat.exists
+
+    - name: "--- Etape 3/4 : Récupération des commits depuis GitLab ---"
+      block:
+        - name: "Commit avant fetch"
+          ansible.builtin.command:
+            cmd: "git log origin/{{ git_branch }} --format='%H %s' -1"
+            chdir: "{{ git_bare_base }}/{{ repo_name }}.git"
+          register: commit_before
+          changed_when: false
+          failed_when: false
+          when: bare_initialized.stat.exists
+
+        - name: "git fetch --all --prune --tags"
+          ansible.builtin.command:
+            cmd: "git fetch origin --prune --tags --force"
+            chdir: "{{ git_bare_base }}/{{ repo_name }}.git"
+          environment:
+            GIT_SSH_COMMAND: "ssh -i {{ git_ssh_key_path }} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+          register: fetch_result
+
+        - name: "Commit après fetch"
+          ansible.builtin.command:
+            cmd: "git log origin/{{ git_branch }} --format='%H %s' -1"
+            chdir: "{{ git_bare_base }}/{{ repo_name }}.git"
+          register: commit_after
+          changed_when: false
+
+        - name: "Résultat fetch — dépôt déjà à jour"
+          ansible.builtin.debug:
+            msg:
+              - "  [OK] Dépôt déjà à jour — aucun nouveau commit"
+              - "  Commit actuel : {{ commit_after.stdout }}"
+          when:
+            - bare_initialized.stat.exists
+            - commit_before.stdout == commit_after.stdout
+
+        - name: "Résultat fetch — nouveaux commits reçus"
+          ansible.builtin.debug:
+            msg:
+              - "  [OK] Nouveaux commits récupérés depuis GitLab"
+              - "  Avant  : {{ commit_before.stdout | default('(premier fetch)') }}"
+              - "  Après  : {{ commit_after.stdout }}"
+          when: not bare_initialized.stat.exists or commit_before.stdout != commit_after.stdout
+
+      rescue:
+        - name: "ERREUR lors du fetch"
+          ansible.builtin.fail:
+            msg: |
+              ERREUR : Le fetch depuis GitLab a échoué.
+              Détail : {{ fetch_result.stderr | default('erreur inconnue') }}
+              Actions : Vérifiez l'accès réseau et la Clé B.
+
+    - name: "--- Etape 4/4 : Vérification du miroir bare ---"
+      block:
+        - name: "Lister les branches disponibles"
+          ansible.builtin.command:
+            cmd: git branch -a
+            chdir: "{{ git_bare_base }}/{{ repo_name }}.git"
+          register: branches
+          changed_when: false
+
+        - name: "Branches disponibles dans le miroir"
+          ansible.builtin.debug:
+            msg: "{{ branches.stdout_lines }}"
+
+  post_tasks:
+    - name: "Résumé final"
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "  SYNCHRO GIT HP TERMINEE AVEC SUCCES"
+          - "  Dépôt    : {{ repo_name }}"
+          - "  Miroir   : {{ git_bare_base }}/{{ repo_name }}.git"
+          - "  Commit   : {{ commit_after.stdout | default('N/A') }}"
+          - "  Prochaine etape : Bouton 2 — Deployer HP"
+          - "============================================================"

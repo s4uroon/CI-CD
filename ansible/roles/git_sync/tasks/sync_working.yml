@@ -29,24 +29,38 @@
   register: git_dir
 
 - name: "[working] Cloner depuis le Git Server (premier déploiement)"
-  ansible.builtin.command:
-    cmd: >
-      git clone
-      --origin {{ git_remote_name }}
-      --no-checkout
-      {{ git_remote_url }}
-      {{ app_root }}
-  when:
-    - not git_dir.stat.exists
-    - git_init_if_missing | default(true)
-  environment:
-    GIT_SSH_COMMAND: "ssh -i {{ git_ssh_key_path }} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
-  register: clone_result
+  block:
+    - name: "[working] Clone initial"
+      ansible.builtin.command:
+        cmd: >
+          git clone
+          --origin {{ git_remote_name }}
+          --no-checkout
+          {{ git_remote_url }}
+          {{ app_root }}
+      when:
+        - not git_dir.stat.exists
+        - git_init_if_missing | default(true)
+      environment:
+        GIT_SSH_COMMAND: "ssh -i {{ git_ssh_key_path }} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+      register: clone_result
 
-- name: "[working] Afficher le résultat du clone"
-  ansible.builtin.debug:
-    var: clone_result.stderr_lines
-  when: clone_result is defined and clone_result.changed
+    - name: "[working] [OK] Dépôt initialisé"
+      ansible.builtin.debug:
+        msg: "  [OK] Dépôt initialisé dans {{ app_root }}"
+      when: clone_result is defined and clone_result.changed
+
+  rescue:
+    - name: "[working] ERREUR clone initial"
+      ansible.builtin.fail:
+        msg: |
+          ERREUR : Impossible de cloner le dépôt dans {{ app_root }}.
+          Source   : {{ git_remote_url }}
+          Clé SSH  : {{ git_ssh_key_path }}
+          Actions  :
+            - Vérifiez que la clé SSH est autorisée sur {{ git_remote_url }}
+            - Vérifiez la connectivité réseau vers le serveur Git
+            - Vérifiez les permissions sur {{ app_root }}
 
 # ─── 3. Vérifier et corriger l'URL du remote ──────────────────────────────────
 
@@ -74,17 +88,35 @@
 
 # ─── 4. Fetch ─────────────────────────────────────────────────────────────────
 
-- name: "[working] git fetch (branches + tags)"
+- name: "[working] Récupérer le commit avant fetch"
   ansible.builtin.command:
-    cmd: "git fetch {{ git_remote_name }} --prune --tags --force"
+    cmd: git log --oneline -1
     chdir: "{{ app_root }}"
-  environment:
-    GIT_SSH_COMMAND: "ssh -i {{ git_ssh_key_path }} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
-  register: fetch_result
+  register: commit_before_working
+  changed_when: false
+  failed_when: false
 
-- name: "[working] Afficher les objets récupérés"
-  ansible.builtin.debug:
-    msg: "{{ fetch_result.stderr_lines | default([]) + fetch_result.stdout_lines | default([]) }}"
+- name: "[working] git fetch (branches + tags)"
+  block:
+    - name: "[working] Exécuter git fetch"
+      ansible.builtin.command:
+        cmd: "git fetch {{ git_remote_name }} --prune --tags --force"
+        chdir: "{{ app_root }}"
+      environment:
+        GIT_SSH_COMMAND: "ssh -i {{ git_ssh_key_path }} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+      register: fetch_result
+
+  rescue:
+    - name: "[working] ERREUR git fetch"
+      ansible.builtin.fail:
+        msg: |
+          ERREUR : Le fetch depuis {{ git_remote_url }} a échoué sur {{ inventory_hostname }}.
+          Clé SSH  : {{ git_ssh_key_path }}
+          Détail   : {{ fetch_result.stderr | default('erreur inconnue') }}
+          Actions  :
+            - Vérifiez que la clé SSH (read-only) est autorisée sur le serveur Git
+            - Vérifiez la connectivité réseau entre {{ inventory_hostname }} et le serveur Git
+            - Vérifiez que le dépôt bare existe sur le serveur Git
 
 # ─── 5. Déterminer la référence cible ─────────────────────────────────────────
 
@@ -94,33 +126,41 @@
       {% if git_tag is defined and git_tag | trim != '' %}tags/{{ git_tag }}
       {% else %}{{ git_remote_name }}/{{ git_branch }}{% endif %}
 
-- name: "[working] Afficher la référence cible"
+- name: "[working] Référence cible"
   ansible.builtin.debug:
-    msg: "Checkout vers : {{ git_checkout_ref | trim }}"
+    msg: "  Checkout vers : {{ git_checkout_ref | trim }}"
 
 # ─── 6. Checkout propre ───────────────────────────────────────────────────────
 
-- name: "[working] Réinitialiser les modifications locales"
-  ansible.builtin.command:
-    cmd: git reset --hard HEAD
-    chdir: "{{ app_root }}"
-  changed_when: false
-
-- name: "[working] Nettoyer les fichiers non trackés"
-  ansible.builtin.command:
-    cmd: "git clean -fd --exclude='.env' --exclude='storage/' --exclude='var/'"
-    chdir: "{{ app_root }}"
-  changed_when: false
-
 - name: "[working] Checkout vers la référence cible"
-  ansible.builtin.command:
-    cmd: "git checkout --force {{ git_checkout_ref | trim }}"
-    chdir: "{{ app_root }}"
-  register: checkout_result
+  block:
+    - name: "[working] Réinitialiser les modifications locales"
+      ansible.builtin.command:
+        cmd: git reset --hard HEAD
+        chdir: "{{ app_root }}"
+      changed_when: false
 
-- name: "[working] Afficher le résultat du checkout"
-  ansible.builtin.debug:
-    var: checkout_result.stdout_lines
+    - name: "[working] Nettoyer les fichiers non trackés"
+      ansible.builtin.command:
+        cmd: "git clean -fd --exclude='.env' --exclude='storage/' --exclude='var/'"
+        chdir: "{{ app_root }}"
+      changed_when: false
+
+    - name: "[working] git checkout"
+      ansible.builtin.command:
+        cmd: "git checkout --force {{ git_checkout_ref | trim }}"
+        chdir: "{{ app_root }}"
+      register: checkout_result
+
+  rescue:
+    - name: "[working] ERREUR checkout"
+      ansible.builtin.fail:
+        msg: |
+          ERREUR : Le checkout vers {{ git_checkout_ref | trim }} a échoué sur {{ inventory_hostname }}.
+          Actions  :
+            - Vérifiez que la référence existe dans le dépôt : {{ git_checkout_ref | trim }}
+            - Vérifiez que le fetch a bien récupéré les derniers commits
+            - Exécutez manuellement : git branch -a dans {{ app_root }}
 
 # ─── 7. Vérification post-checkout ────────────────────────────────────────────
 
@@ -131,9 +171,13 @@
   register: git_log
   changed_when: false
 
-- name: "[working] Afficher les derniers commits"
+- name: "[working] [OK] Code synchronisé"
   ansible.builtin.debug:
-    msg: "{{ git_log.stdout_lines }}"
+    msg:
+      - "  [OK] Code synchronisé sur {{ inventory_hostname }}"
+      - "  Référence : {{ git_checkout_ref | trim }}"
+      - "  Commits récents :"
+      - "{{ git_log.stdout_lines }}"
 
 - name: "[working] Corriger les permissions du répertoire"
   ansible.builtin.file:

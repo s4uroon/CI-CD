@@ -1,0 +1,64 @@
+---
+# ─── Configuration du dépôt : myapp ─────────────────────────────────────────
+# Fichier chargé dynamiquement par les playbooks via la variable repo_name.
+# Semaphore Survey Variable : repo_name = myapp
+#
+# Pour ajouter un nouveau dépôt : copier ce fichier, adapter les valeurs,
+# et le nommer <repo_name>.yml dans ce répertoire.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─── Identifiant du dépôt ─────────────────────────────────────────────────────
+repo_name: myapp
+
+# ─── Source Git ───────────────────────────────────────────────────────────────
+# URL du dépôt sur GitLab Central (utilisée par Git+Ansible HP pour fetcher)
+git_remote_url: "git@gitlab:mygroup/myapp.git"
+
+# Branche principale déployée
+git_branch: main
+
+# ─── Application ──────────────────────────────────────────────────────────────
+# Type : php | python
+app_type: php
+
+# Répertoire de déploiement sur les serveurs App (working tree)
+app_root: "/opt/apps/myapp"
+
+# Nom du service systemd à redémarrer après déploiement
+app_service_name: myapp
+
+# ─── Serveurs cibles HP ───────────────────────────────────────────────────────
+# Liste des serveurs applicatifs Hors-Prod qui recevront ce déploiement.
+# Ces hostnames doivent être définis dans inventory/hp/hosts.yml
+app_servers_hp:
+  - app1-hp.company.com
+  # - app2-hp.company.com   # Décommenter pour ajouter un second serveur
+
+# ─── Serveurs cibles Prod ─────────────────────────────────────────────────────
+# Liste des serveurs applicatifs Production qui recevront ce déploiement.
+# Ces hostnames doivent être définis dans inventory/prod/hosts.yml
+app_servers_prod:
+  - app1-prod.company.com
+  # - app2-prod.company.com
+
+# ─── Base de données (si applicable) ──────────────────────────────────────────
+run_migrations: true
+
+# HP
+db_host_hp: localhost
+db_name_hp: "myapp_recette"
+db_user_hp: "myapp_user"
+
+# Prod
+db_host_prod: prod-db.company.com
+db_name_prod: "myapp_prod"
+db_user_prod: "myapp_user"
+# db_password : défini dans les secrets Semaphore (ne jamais committer)
+
+# ─── PHP spécifique ───────────────────────────────────────────────────────────
+# php_version: "8.2"
+# composer_args: "--no-dev --optimize-autoloader --no-interaction"
+
+# ─── Python spécifique ────────────────────────────────────────────────────────
+# python_venv_path: "/opt/apps/myapp/.venv"
+# requirements_file: "/opt/apps/myapp/requirements.txt"

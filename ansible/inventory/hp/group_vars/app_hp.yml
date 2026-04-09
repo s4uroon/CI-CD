@@ -1,0 +1,15 @@
+---
+# Variables — Serveurs applicatifs HP
+
+# Répertoire de déploiement des applications
+app_base_dir: /opt/apps
+
+# Clé SSH que CES SERVEURS utilisent pour fetcher le code depuis Git+Ansible HP (Clé D)
+git_ssh_key_path: "/home/{{ app_user }}/.ssh/id_apphp_gitansiblehp"
+
+# Alias SSH pour Git+Ansible HP (défini dans ~/.ssh/config sur ces serveurs)
+git_server_host: git-ansible-hp
+
+# Environnement applicatif
+app_env: recette
+app_debug: "true"

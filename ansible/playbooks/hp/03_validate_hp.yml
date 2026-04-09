@@ -1,0 +1,115 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════════
+# SEMAPHORE HP — BOUTON 3 : Valider le déploiement HP
+# ═══════════════════════════════════════════════════════════════════════════════
+# Cible   : Serveur Git+Ansible HP
+# Action  : Pose un tag git "validated/hp/<repo_name>" sur le commit actuellement
+#           présent dans le dépôt bare HP. Ce tag est le prérequis obligatoire
+#           pour lancer la Synchro Git Prod (Bouton 1 Semaphore Prod).
+#
+# Survey Variable Semaphore :
+#   repo_name  (ex: myapp)  — obligatoire
+#
+# Le tag créé : validated/hp/<repo_name>
+# ═══════════════════════════════════════════════════════════════════════════════
+
+- name: "[HP] Validation du déploiement HP — pose du flag"
+  hosts: git_ansible_hp
+  gather_facts: true
+  become: false
+
+  vars:
+    repo_config_file: "{{ playbook_dir }}/../../repos/{{ repo_name }}.yml"
+    validation_tag: "validated/hp/{{ repo_name }}"
+
+  pre_tasks:
+    - name: "Vérifier que repo_name est fourni"
+      ansible.builtin.fail:
+        msg: "ERREUR : La variable 'repo_name' est obligatoire."
+      when: repo_name is not defined or repo_name | trim == ""
+
+    - name: "Charger la configuration du dépôt {{ repo_name }}"
+      ansible.builtin.include_vars:
+        file: "{{ repo_config_file }}"
+
+    - name: "Information de validation"
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "  BOUTON 3 — VALIDATION DEPLOIEMENT HP"
+          - "  Dépôt : {{ repo_name }}"
+          - "  Cette action indique que le déploiement HP a été validé"
+          - "  et autorise la synchronisation en Production."
+          - "============================================================"
+
+  tasks:
+    - name: "Vérifier que le dépôt bare existe"
+      ansible.builtin.stat:
+        path: "{{ git_bare_base }}/{{ repo_name }}.git/HEAD"
+      register: bare_exists
+
+    - name: "Echouer si le dépôt bare n'existe pas"
+      ansible.builtin.fail:
+        msg: |
+          ERREUR : Le dépôt bare {{ repo_name }} n'existe pas sur ce serveur.
+          Exécutez d'abord le Bouton 1 (Synchro Git HP).
+      when: not bare_exists.stat.exists
+
+    - name: "Récupérer le dernier commit sur la branche {{ git_branch }}"
+      ansible.builtin.command:
+        cmd: "git log origin/{{ git_branch }} --format='%H' -1"
+        chdir: "{{ git_bare_base }}/{{ repo_name }}.git"
+      register: latest_commit
+      changed_when: false
+
+    - name: "Récupérer la description du commit"
+      ansible.builtin.command:
+        cmd: "git log origin/{{ git_branch }} --format='%s (%an, %ar)' -1"
+        chdir: "{{ git_bare_base }}/{{ repo_name }}.git"
+      register: commit_description
+      changed_when: false
+
+    - name: "Vérifier si un flag de validation précédent existe"
+      ansible.builtin.command:
+        cmd: "git tag -l '{{ validation_tag }}'"
+        chdir: "{{ git_bare_base }}/{{ repo_name }}.git"
+      register: existing_tag
+      changed_when: false
+
+    - name: "Information sur le flag précédent"
+      ansible.builtin.debug:
+        msg: "  Info : Un flag de validation précédent existait — il sera remplacé."
+      when: existing_tag.stdout != ""
+
+    - name: "Créer le tag de validation sur le commit actuel"
+      ansible.builtin.command:
+        cmd: >
+          git tag -f "{{ validation_tag }}"
+          {{ latest_commit.stdout }}
+        chdir: "{{ git_bare_base }}/{{ repo_name }}.git"
+      register: tag_result
+
+    - name: "Vérifier que le tag a été créé"
+      ansible.builtin.command:
+        cmd: "git tag -l '{{ validation_tag }}'"
+        chdir: "{{ git_bare_base }}/{{ repo_name }}.git"
+      register: tag_check
+      changed_when: false
+      failed_when: tag_check.stdout == ""
+
+  post_tasks:
+    - name: "Résumé de la validation"
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "  FLAG DE VALIDATION HP POSE AVEC SUCCES"
+          - ""
+          - "  Dépôt   : {{ repo_name }}"
+          - "  Tag     : {{ validation_tag }}"
+          - "  Commit  : {{ latest_commit.stdout }}"
+          - "  Message : {{ commit_description.stdout }}"
+          - "  Date    : {{ ansible_date_time.iso8601 }}"
+          - ""
+          - "  Le Semaphore PROD peut maintenant lancer :"
+          - "  Bouton 1 — Synchro Git Prod"
+          - "============================================================"

@@ -1,0 +1,15 @@
+---
+# Variables — Serveurs applicatifs Prod
+
+# Répertoire de déploiement des applications
+app_base_dir: /opt/apps
+
+# Clé SSH que CES SERVEURS utilisent pour fetcher le code depuis Git+Ansible Prod (Clé H)
+git_ssh_key_path: "/home/{{ app_user }}/.ssh/id_appprod_gitansibleprod"
+
+# Alias SSH pour Git+Ansible Prod (défini dans ~/.ssh/config sur ces serveurs)
+git_server_host: git-ansible-prod
+
+# Environnement applicatif
+app_env: production
+app_debug: "false"
