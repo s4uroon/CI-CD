@@ -1,0 +1,63 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════════
+# BOUTON 1 SEMAPHORE : Synchro Git HP
+# ═══════════════════════════════════════════════════════════════════════════════
+# Cible  : Serveur Git Hors-Prod (dépôt bare)
+# Action : Le serveur Git HP se connecte à GitLab et récupère les derniers
+#          commits/tags (git fetch). Aucun déploiement applicatif ici.
+#
+# Flux   :
+#   Opérateur
+#     --> [Semaphore] clique "Synchro Git HP"
+#     --> Orchestrateur --SSH(Clé A)--> Git HP Server
+#     --> Git HP Server --git fetch(Clé E)--> GitLab Central
+#     --> Miroir bare mis à jour
+# ═══════════════════════════════════════════════════════════════════════════════
+
+- name: Synchronisation du dépôt bare Git Hors-Prod depuis GitLab
+  hosts: git_hp
+  gather_facts: false
+  become: false
+
+  vars:
+    sync_branch: "{{ git_branch | default('main') }}"
+    sync_tag: "{{ git_tag | default('') }}"
+
+  pre_tasks:
+    - name: Vérifier la connectivité vers Git HP
+      ansible.builtin.ping:
+
+    - name: Afficher les paramètres de synchronisation
+      ansible.builtin.debug:
+        msg:
+          - "Serveur Git cible : {{ inventory_hostname }}"
+          - "Dépôt bare        : {{ git_bare_root }}"
+          - "Source (remote)   : {{ git_remote_name }} -> {{ git_remote_url }}"
+          - "Branche           : {{ sync_tag if sync_tag else sync_branch }}"
+
+  tasks:
+    - name: Synchronisation bare depuis GitLab (rôle git_sync)
+      ansible.builtin.include_role:
+        name: git_sync
+      vars:
+        git_repo_type: bare
+
+  post_tasks:
+    - name: Récupérer le dernier commit disponible dans le miroir
+      ansible.builtin.command:
+        cmd: "git log origin/{{ git_branch | default('main') }} --oneline -1"
+        chdir: "{{ git_bare_root }}"
+      register: latest_commit
+      changed_when: false
+      failed_when: false
+
+    - name: Afficher le résumé de synchronisation
+      ansible.builtin.debug:
+        msg:
+          - "================================================"
+          - "SYNCHRO GIT HP TERMINEE"
+          - "Miroir   : {{ git_bare_root }}"
+          - "Commit   : {{ latest_commit.stdout | default('N/A') }}"
+          - "Serveur  : {{ inventory_hostname }}"
+          - "================================================"
+          - "Prochaine etape : Bouton 2 - Deployer HP"

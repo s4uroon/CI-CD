@@ -2,12 +2,10 @@
 
 ## Prérequis
 
-Ansible Semaphore doit être installé et accessible via son interface web
-(par défaut : `http://semaphore.prod.company.com:3000`).
+Ansible Semaphore installé sur l'Orchestrateur (`semaphore.prod.company.com`).
 
 Installation recommandée via Docker Compose :
 ```yaml
-# docker-compose.yml sur l'Orchestrateur
 version: "3.8"
 services:
   semaphore:
@@ -17,11 +15,11 @@ services:
     environment:
       SEMAPHORE_DB_DIALECT: bolt
       SEMAPHORE_ADMIN: admin
-      SEMAPHORE_ADMIN_PASSWORD: "changeme"  # A changer !
+      SEMAPHORE_ADMIN_PASSWORD: "changeme"
       SEMAPHORE_ADMIN_EMAIL: admin@company.com
     volumes:
       - semaphore_data:/var/lib/semaphore
-      - /home/semaphore/.ssh:/root/.ssh:ro   # Montage des clés SSH
+      - /home/semaphore/.ssh:/root/.ssh:ro
 volumes:
   semaphore_data:
 ```
@@ -30,126 +28,93 @@ volumes:
 
 ## Étape 1 — Créer un Projet
 
-Dans Semaphore → **Projects** → **New Project** :
-
+**Projects → New Project** :
 ```
 Nom : Pipeline Déploiement Sécurisé
 ```
 
 ---
 
-## Étape 2 — Configurer le Repository (Source du code Ansible)
+## Étape 2 — Configurer le Repository
 
-Menu **Repositories** → **Add Repository** :
-
+**Repositories → Add Repository** :
 ```yaml
-Nom           : CI-CD Ansible
-URL           : git@gitlab:mygroup/ci-cd.git
-Branch        : main
-SSH Key       : [clé D — id_hp_gitlab sur l'Orchestrateur, ou clé dédiée lecture GitLab]
+Nom    : CI-CD Ansible
+URL    : git@gitlab:mygroup/ci-cd.git
+Branch : main
+SSH Key: [clé de lecture du dépôt CI-CD sur GitLab]
 ```
-
-> Ce dépôt contient les playbooks et rôles Ansible de ce projet.
 
 ---
 
-## Étape 3 — Configurer les Clés SSH
+## Étape 3 — Configurer le Key Store (8 clés)
 
-Menu **Key Store** → **Add Key** pour chaque clé :
+**Key Store → Add Key** pour chacune des clés Ansible (A, B, C, D) :
 
-### Clé A — Orchestrateur vers Hors-Prod
+| Nom dans Semaphore        | Clé privée à coller          | Usage                  |
+|---------------------------|------------------------------|------------------------|
+| `ssh-key-orch-git-hp`     | `~/.ssh/id_orch_git_hp`      | Ansible → Git HP       |
+| `ssh-key-orch-app-hp`     | `~/.ssh/id_orch_app_hp`      | Ansible → App HP       |
+| `ssh-key-orch-git-prod`   | `~/.ssh/id_orch_git_prod`    | Ansible → Git Prod     |
+| `ssh-key-orch-app-prod`   | `~/.ssh/id_orch_app_prod`    | Ansible → App Prod     |
 
-```yaml
-Nom  : ssh-key-orch-hors-prod
-Type : SSH Key
-Clé privée : [coller le contenu de ~/.ssh/id_orch_hp]
-```
-
-### Clé B — Orchestrateur vers Prod
-
-```yaml
-Nom  : ssh-key-orch-prod
-Type : SSH Key
-Clé privée : [coller le contenu de ~/.ssh/id_orch_prod]
-```
-
-### Clé GitLab — Lecture du dépôt CI-CD
-
-```yaml
-Nom  : ssh-key-gitlab-reader
-Type : SSH Key
-Clé privée : [clé de lecture du dépôt CI-CD sur GitLab]
-```
+> Les clés E, F, G, H (git fetch entre serveurs) sont configurées directement
+> dans `~/.ssh/` des serveurs cibles et ne passent pas par Semaphore.
 
 ---
 
 ## Étape 4 — Configurer les Inventaires
 
-Menu **Inventory** → **Add Inventory** :
-
-### Inventaire principal
-
+**Inventory → Add Inventory** :
 ```yaml
-Nom    : hosts-production
+Nom    : hosts-pipeline
 Type   : File
 Fichier: ansible/inventory/hosts.yml
-Creds  : (laisser vide, les clés SSH sont dans ansible.cfg / group_vars)
 ```
 
 ---
 
 ## Étape 5 — Configurer les Environnements
 
-Menu **Environment** → **Add Environment** :
+**Environment → Add Environment** :
 
-### Environnement Hors-Prod
-
+### Environnement HP (pour Boutons 1 et 2)
 ```yaml
 Nom  : env_hors_prod
 JSON :
 {
-  "ANSIBLE_CONFIG": "ansible/ansible.cfg",
-  "GIT_BRANCH": "main"
+  "ANSIBLE_CONFIG": "ansible/ansible.cfg"
 }
 ```
 
-### Environnement Production
-
+### Environnement Prod (pour Boutons 3, 4 et 5)
 ```yaml
 Nom  : env_prod
 JSON :
 {
-  "ANSIBLE_CONFIG": "ansible/ansible.cfg",
-  "GIT_BRANCH": "main"
+  "ANSIBLE_CONFIG": "ansible/ansible.cfg"
 }
 ```
 
-> Les secrets (mots de passe BDD) doivent être passés ici en JSON
-> ou mieux : via Ansible Vault avec la clé de déchiffrement en variable
-> d'environnement `ANSIBLE_VAULT_PASSWORD_FILE`.
+> Les secrets (mots de passe BDD) se définissent ici en JSON,
+> ou via Ansible Vault avec `ANSIBLE_VAULT_PASSWORD_FILE` en variable d'env.
 
 ---
 
 ## Étape 6 — Créer les 5 Task Templates
 
-Menu **Task Templates** → **Add Template** :
-
 ---
 
-### Template 1 : Synchro Hors-Prod
+### Template 1 : Synchro Git HP
 
 ```yaml
-Nom          : 1. Synchro Hors-Prod
-Playbook     : ansible/playbooks/01_sync_hors_prod.yml
-Inventory    : hosts-production
-Repository   : CI-CD Ansible
-Environment  : env_hors_prod
-SSH Key      : ssh-key-orch-hors-prod
-Description  : Synchronise le code de GitLab vers le serveur Hors-Prod
-
-# Options avancées :
-Suppress Success Alerts : Non
-Allow Override of Args  : Oui  (pour passer une branche spécifique)
+Nom         : 1. Synchro Git HP
+Playbook    : ansible/playbooks/01_sync_git_hp.yml
+Inventory   : hosts-pipeline
+Repository  : CI-CD Ansible
+Environment : env_hors_prod
+SSH Key     : ssh-key-orch-git-hp
+Description : Met à jour le dépôt bare sur Git HP depuis GitLab Central
 ```
 
 Variables optionnelles (Survey) :
@@ -163,30 +128,30 @@ Variables optionnelles (Survey) :
 
 ---
 
-### Template 2 : Déployer Hors-Prod
+### Template 2 : Déployer HP
 
 ```yaml
-Nom          : 2. Déployer Hors-Prod
-Playbook     : ansible/playbooks/02_deploy_hors_prod.yml
-Inventory    : hosts-production
-Repository   : CI-CD Ansible
-Environment  : env_hors_prod
-SSH Key      : ssh-key-orch-hors-prod
-Description  : Exécute les scripts de déploiement sur Hors-Prod
+Nom         : 2. Déployer HP
+Playbook    : ansible/playbooks/02_deploy_hp.yml
+Inventory   : hosts-pipeline
+Repository  : CI-CD Ansible
+Environment : env_hors_prod
+SSH Key     : ssh-key-orch-app-hp
+Description : App HP tire le code depuis Git HP et déploie l'application
 ```
 
 ---
 
-### Template 3 : Synchro Prod
+### Template 3 : Synchro Git Prod
 
 ```yaml
-Nom          : 3. Synchro Prod
-Playbook     : ansible/playbooks/03_sync_prod.yml
-Inventory    : hosts-production
-Repository   : CI-CD Ansible
-Environment  : env_prod
-SSH Key      : ssh-key-orch-prod
-Description  : Synchronise le code de Hors-Prod vers le serveur Prod
+Nom         : 3. Synchro Git Prod
+Playbook    : ansible/playbooks/03_sync_git_prod.yml
+Inventory   : hosts-pipeline
+Repository  : CI-CD Ansible
+Environment : env_prod
+SSH Key     : ssh-key-orch-git-prod
+Description : Git Prod tire le code depuis Git HP (la Prod ne connaît pas GitLab)
 ```
 
 ---
@@ -194,13 +159,13 @@ Description  : Synchronise le code de Hors-Prod vers le serveur Prod
 ### Template 4 : Déployer Prod
 
 ```yaml
-Nom          : 4. Déployer Prod
-Playbook     : ansible/playbooks/04_deploy_prod.yml
-Inventory    : hosts-production
-Repository   : CI-CD Ansible
-Environment  : env_prod
-SSH Key      : ssh-key-orch-prod
-Description  : Exécute les scripts de déploiement en Production
+Nom         : 4. Déployer Prod
+Playbook    : ansible/playbooks/04_deploy_prod.yml
+Inventory   : hosts-pipeline
+Repository  : CI-CD Ansible
+Environment : env_prod
+SSH Key     : ssh-key-orch-app-prod
+Description : App Prod tire le code depuis Git Prod et déploie l'application
 ```
 
 ---
@@ -208,20 +173,20 @@ Description  : Exécute les scripts de déploiement en Production
 ### Template 5 : Rollback Prod
 
 ```yaml
-Nom          : 5. Rollback Prod
-Playbook     : ansible/playbooks/05_rollback_prod.yml
-Inventory    : hosts-production
-Repository   : CI-CD Ansible
-Environment  : env_prod
-SSH Key      : ssh-key-orch-prod
-Description  : Revient à une version précédente en Production
+Nom         : 5. Rollback Prod
+Playbook    : ansible/playbooks/05_rollback_prod.yml
+Inventory   : hosts-pipeline
+Repository  : CI-CD Ansible
+Environment : env_prod
+SSH Key     : ssh-key-orch-app-prod
+Description : Revient à une version précédente sur App Prod (checkout tag Git)
 ```
 
 Variables obligatoires (Survey) :
 ```yaml
 - name     : target_version
   title    : Version cible du rollback (ex: v1.4.2)
-  description: Tag Git de la version vers laquelle revenir (voir git log --tags)
+  description: Tag Git de la version vers laquelle revenir
   type     : String
   required : Oui
 ```
@@ -231,63 +196,55 @@ Variables obligatoires (Survey) :
 ## Vue finale de l'interface Semaphore
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  Ansible Semaphore — Task Templates                             │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  [▶ Run]  1. Synchro Hors-Prod      [Hors-Prod ← GitLab]      │
-│  [▶ Run]  2. Déployer Hors-Prod     [Scripts deploy HP]        │
-│  [▶ Run]  3. Synchro Prod           [Prod ← Hors-Prod]        │
-│  [▶ Run]  4. Déployer Prod          [Scripts deploy Prod]      │
-│  [▶ Run]  5. Rollback Prod          [⚠ Saisir version]        │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  Ansible Semaphore — Task Templates                              │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  [Run]  1. Synchro Git HP      Git HP <-- GitLab (bare fetch)   │
+│  [Run]  2. Déployer HP         App HP <-- Git HP + deploy        │
+│                                                                  │
+│  [Run]  3. Synchro Git Prod    Git Prod <-- Git HP (bare fetch)  │
+│  [Run]  4. Déployer Prod       App Prod <-- Git Prod + deploy    │
+│                                                                  │
+│  [Run]  5. Rollback Prod       [! saisir target_version]        │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Gestion des accès utilisateurs dans Semaphore
+## Gestion des accès utilisateurs
 
-### Rôles recommandés
+| Rôle Semaphore | Templates accessibles          | Profil                  |
+|----------------|--------------------------------|-------------------------|
+| `Viewer`       | Lecture logs uniquement        | Développeurs            |
+| `Task Runner`  | Templates 1, 2, 3, 4           | Chefs de projet, QA     |
+| `Manager`      | Tous (1 à 5, dont Rollback)    | Tech Lead, DevOps       |
+| `Admin`        | Configuration complète         | Équipe Infrastructure   |
 
-| Rôle Semaphore | Accès autorisé                          | Usage                    |
-|----------------|-----------------------------------------|--------------------------|
-| `Viewer`       | Lecture seule (logs, historique)        | Développeurs             |
-| `Task Runner`  | Lancer les templates 1, 2, 3, 4         | Chefs de projet, QA      |
-| `Manager`      | Lancer tous les templates (incl. 5)     | Tech Lead, DevOps        |
-| `Admin`        | Configuration complète                  | Équipe Infrastructure    |
-
-> Restreindre l'accès au template 5 (Rollback Prod) aux rôles `Manager` et `Admin`
-> uniquement. Semaphore gère les permissions par template.
+> Restreindre le Template 5 (Rollback Prod) aux rôles `Manager` et `Admin`.
 
 ---
 
 ## Notifications (optionnel)
 
-Semaphore supporte les alertes par email et webhook :
-
 ```yaml
-# Dans les paramètres du projet :
 Notifications:
   - Event  : Task Failed
-    Channel: Email / Slack webhook
-    Message: "ECHEC - {{ template_name }} sur {{ inventory }}"
+    Channel: Email ou Slack webhook
+    Message : "ECHEC - {{ template_name }}"
 
   - Event  : Task Success
-    Channel: Email
-    Filter  : Templates contenant "Prod"
-    Message: "OK - Déploiement Production réussi"
+    Filter  : Templates 4 et 5 (Prod uniquement)
+    Channel : Email
+    Message : "OK - Déploiement/Rollback Production terminé"
 ```
 
 ---
 
 ## Audit et traçabilité
 
-Semaphore conserve un historique complet des tâches :
-
-- **Menu History** : toutes les exécutions avec horodatage, utilisateur, statut
-- **Logs complets** : sortie Ansible consultable par tâche
-- Export possible vers un SIEM via webhook sur chaque événement
-
-Pour une traçabilité renforcée, configurer le `log_path` dans `ansible.cfg`
-et centraliser les logs via rsyslog ou Loki.
+Semaphore conserve l'historique complet des tâches :
+- **History** : chaque exécution avec horodatage, utilisateur, statut, durée
+- **Logs** : sortie Ansible complète consultable par tâche
+- Le `log_path` dans `ansible.cfg` centralise les logs sur l'Orchestrateur

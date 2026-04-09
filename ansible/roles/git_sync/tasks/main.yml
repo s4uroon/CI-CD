@@ -1,141 +1,23 @@
 ---
-# ─── Rôle : git_sync ──────────────────────────────────────────────────────────
-# Synchronise le code source en appliquant un fetch + checkout propre.
-# N'utilise PAS git pull pour éviter tout merge automatique non contrôlé.
+# ─── Rôle : git_sync — Dispatcher ────────────────────────────────────────────
+# Redirige vers la bonne stratégie selon git_repo_type :
+#   bare    → sync_bare.yml    (serveurs Git HP et Git Prod)
+#   working → sync_working.yml (serveurs App HP et App Prod)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ─── 1. Vérifier/créer le répertoire de l'application ─────────────────────────
-
-- name: Créer le répertoire de l'application si inexistant
-  ansible.builtin.file:
-    path: "{{ app_root }}"
-    state: directory
-    owner: "{{ app_user }}"
-    group: "{{ app_group }}"
-    mode: "0755"
-  become: true
-  become_user: root
-
-# ─── 2. Cloner le dépôt si c'est la première fois ─────────────────────────────
-
-- name: Vérifier si le dépôt Git est déjà initialisé
-  ansible.builtin.stat:
-    path: "{{ app_root }}/.git"
-  register: git_dir
-
-- name: Cloner le dépôt (premier déploiement uniquement)
-  ansible.builtin.command:
-    cmd: >
-      git clone
-      --origin {{ git_remote_name }}
-      --no-checkout
-      {{ git_remote_url }}
-      {{ app_root }}
-  when:
-    - not git_dir.stat.exists
-    - git_clone_if_missing | default(true)
-  environment:
-    GIT_SSH_COMMAND: "ssh -i {{ git_ssh_key_path }} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
-  register: clone_result
-
-- name: Afficher le résultat du clone
+- name: Afficher le mode de synchronisation Git
   ansible.builtin.debug:
-    var: clone_result.stdout_lines
-  when: clone_result is defined and clone_result.changed
+    msg: "Mode git_sync : {{ git_repo_type }} | Remote : {{ git_remote_name }} -> {{ git_remote_url }}"
 
-# ─── 3. S'assurer que le remote est correctement configuré ────────────────────
+- name: Synchronisation dépôt bare (serveur Git)
+  ansible.builtin.include_tasks: sync_bare.yml
+  when: git_repo_type == "bare"
 
-- name: Vérifier l'URL du remote
-  ansible.builtin.command:
-    cmd: "git remote get-url {{ git_remote_name }}"
-    chdir: "{{ app_root }}"
-  register: current_remote_url
-  changed_when: false
-  failed_when: false
+- name: Synchronisation dépôt working tree (serveur App)
+  ansible.builtin.include_tasks: sync_working.yml
+  when: git_repo_type == "working"
 
-- name: Ajouter le remote s'il n'existe pas
-  ansible.builtin.command:
-    cmd: "git remote add {{ git_remote_name }} {{ git_remote_url }}"
-    chdir: "{{ app_root }}"
-  when: current_remote_url.rc != 0
-
-- name: Mettre à jour l'URL du remote si elle a changé
-  ansible.builtin.command:
-    cmd: "git remote set-url {{ git_remote_name }} {{ git_remote_url }}"
-    chdir: "{{ app_root }}"
-  when:
-    - current_remote_url.rc == 0
-    - current_remote_url.stdout | trim != git_remote_url
-
-# ─── 4. Fetch : récupérer tous les objets et tags depuis le remote ─────────────
-
-- name: Git fetch (branches + tags)
-  ansible.builtin.command:
-    cmd: "git fetch {{ git_remote_name }} --prune --tags --force"
-    chdir: "{{ app_root }}"
-  environment:
-    GIT_SSH_COMMAND: "ssh -i {{ git_ssh_key_path }} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
-  register: fetch_result
-  changed_when: fetch_result.stderr != ""   # git fetch écrit sur stderr même en succès
-
-- name: Afficher le résultat du fetch
-  ansible.builtin.debug:
-    msg: "{{ fetch_result.stderr_lines | default([]) + fetch_result.stdout_lines | default([]) }}"
-
-# ─── 5. Déterminer la cible du checkout (tag ou branche) ─────────────────────
-
-- name: Définir la référence Git cible
-  ansible.builtin.set_fact:
-    git_checkout_ref: >-
-      {% if git_tag is defined and git_tag | trim != '' %}tags/{{ git_tag }}
-      {% else %}{{ git_remote_name }}/{{ git_branch }}{% endif %}
-
-- name: Afficher la référence Git cible
-  ansible.builtin.debug:
-    msg: "Checkout vers : {{ git_checkout_ref | trim }}"
-
-# ─── 6. Checkout propre (sans merge) ──────────────────────────────────────────
-
-- name: Réinitialiser les modifications locales non committées
-  ansible.builtin.command:
-    cmd: git reset --hard HEAD
-    chdir: "{{ app_root }}"
-  changed_when: false
-
-- name: Nettoyer les fichiers non trackés (ex: fichiers compilés)
-  ansible.builtin.command:
-    cmd: git clean -fd --exclude=".env" --exclude="storage/" --exclude="var/"
-    chdir: "{{ app_root }}"
-  changed_when: false
-
-- name: Checkout vers la référence cible
-  ansible.builtin.command:
-    cmd: "git checkout --force {{ git_checkout_ref | trim }}"
-    chdir: "{{ app_root }}"
-  register: checkout_result
-
-- name: Afficher le résultat du checkout
-  ansible.builtin.debug:
-    var: checkout_result.stdout_lines
-
-# ─── 7. Vérification post-checkout ────────────────────────────────────────────
-
-- name: Récupérer le commit actuel après checkout
-  ansible.builtin.command:
-    cmd: git log --oneline -3
-    chdir: "{{ app_root }}"
-  register: git_log
-  changed_when: false
-
-- name: Afficher les derniers commits
-  ansible.builtin.debug:
-    msg: "{{ git_log.stdout_lines }}"
-
-- name: Vérifier les permissions du répertoire applicatif
-  ansible.builtin.file:
-    path: "{{ app_root }}"
-    owner: "{{ app_user }}"
-    group: "{{ app_group }}"
-    recurse: false
-  become: true
-  become_user: root
+- name: Échouer si git_repo_type est invalide
+  ansible.builtin.fail:
+    msg: "git_repo_type doit être 'bare' ou 'working', valeur reçue : '{{ git_repo_type }}'"
+  when: git_repo_type not in ['bare', 'working']

@@ -1,0 +1,86 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════════
+# BOUTON 3 SEMAPHORE : Synchro Git Prod
+# ═══════════════════════════════════════════════════════════════════════════════
+# Cible  : Serveur Git Prod (dépôt bare)
+# Action : Le serveur Git Prod se connecte au serveur Git HP et récupère
+#          les derniers commits/tags (git fetch). Aucun déploiement applicatif.
+#
+# Prérequis : Boutons 1 + 2 (Synchro + Deploy HP) validés par QA.
+#
+# Flux   :
+#   Opérateur
+#     --> [Semaphore] clique "Synchro Git Prod"
+#     --> Orchestrateur --SSH(Clé C)--> Git Prod Server
+#     --> Git Prod Server --git fetch(Clé F)--> Git HP Server (bare)
+#     --> Miroir bare Prod mis à jour
+#
+# Point clé : La Prod ne connaît pas GitLab.
+#             Elle ne voit que le Git HP comme source de vérité.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+- name: Synchronisation du dépôt bare Git Prod depuis Git HP
+  hosts: git_prod
+  gather_facts: false
+  become: false
+
+  pre_tasks:
+    - name: Vérifier la connectivité vers Git Prod
+      ansible.builtin.ping:
+
+    - name: Afficher les paramètres de synchronisation
+      ansible.builtin.debug:
+        msg:
+          - "Serveur Git cible : {{ inventory_hostname }}"
+          - "Dépôt bare        : {{ git_bare_root }}"
+          - "Source (remote)   : {{ git_remote_name }} -> {{ git_remote_url }}"
+          - "NOTE : Ce serveur tire depuis Git HP, pas depuis GitLab"
+
+    - name: Tester la connectivité SSH de Git Prod vers Git HP
+      ansible.builtin.command:
+        cmd: >
+          ssh -i {{ git_ssh_key_path }}
+              -o StrictHostKeyChecking=accept-new
+              -o BatchMode=yes
+              -o ConnectTimeout=10
+              deploy@git-hp
+              "git-upload-pack --stateless-rpc --advertise-refs /opt/git/{{ app_name }}.git"
+      register: ssh_test
+      changed_when: false
+      failed_when: false
+
+    - name: Échouer si Git Prod ne peut pas joindre Git HP
+      ansible.builtin.fail:
+        msg: >
+          Git Prod ne peut pas joindre Git HP via SSH.
+          Vérifiez la Clé F (id_gitprod_githp) et le ~/.ssh/config sur Git Prod.
+          Erreur : {{ ssh_test.stderr | default('timeout ou refus de connexion') }}
+      when: ssh_test.rc != 0
+
+  tasks:
+    - name: Synchronisation bare depuis Git HP (rôle git_sync)
+      ansible.builtin.include_role:
+        name: git_sync
+      vars:
+        git_repo_type: bare
+
+  post_tasks:
+    - name: Récupérer le dernier commit dans le miroir Prod
+      ansible.builtin.command:
+        cmd: "git log origin/{{ git_branch | default('main') }} --oneline -1"
+        chdir: "{{ git_bare_root }}"
+      register: latest_commit
+      changed_when: false
+      failed_when: false
+
+    - name: Afficher le résumé de synchronisation
+      ansible.builtin.debug:
+        msg:
+          - "================================================"
+          - "SYNCHRO GIT PROD TERMINEE"
+          - "Miroir   : {{ git_bare_root }}"
+          - "Commit   : {{ latest_commit.stdout | default('N/A') }}"
+          - "Source   : Git HP ({{ git_remote_url }})"
+          - "Serveur  : {{ inventory_hostname }}"
+          - "================================================"
+          - "Prochaine etape : Bouton 4 - Deployer Prod"

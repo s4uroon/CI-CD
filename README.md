@@ -1,7 +1,7 @@
 # Pipeline de Déploiement Sécurisé — Guide d'Architecture et d'Implémentation
 
 > **Stack** : GitLab · Ansible · Ansible Semaphore
-> **Modèle** : Pull en cascade (GitLab → Hors-Prod → Prod)
+> **Modèle** : Pull en cascade (GitLab → Git HP → Git Prod → App Prod)
 > **Déclenchement** : Manuel via Semaphore (Single Pane of Glass)
 
 ---
@@ -9,9 +9,9 @@
 ## Table des matières
 
 1. [Vue d'ensemble](#1-vue-densemble)
-2. [Structure du dépôt](#2-structure-du-dépôt)
-3. [Prérequis](#3-prérequis)
-4. [Configuration Git sur les serveurs cibles](#4-configuration-git-sur-les-serveurs-cibles)
+2. [Infrastructure — 6 serveurs](#2-infrastructure--6-serveurs)
+3. [Structure du dépôt](#3-structure-du-dépôt)
+4. [Prérequis](#4-prérequis)
 5. [Gestion des clés SSH](#5-gestion-des-clés-ssh)
 6. [Playbooks Ansible](#6-playbooks-ansible)
 7. [Configuration d'Ansible Semaphore](#7-configuration-dansible-semaphore)
@@ -22,136 +22,132 @@
 
 ## 1. Vue d'ensemble
 
-Le flux de déploiement suit un modèle **Pull en cascade strict** :
+Le flux de déploiement suit un modèle **Pull en cascade strict** à travers
+des serveurs Git dédiés (dépôts bare) qui servent de relais entre les
+environnements. Aucun serveur ne "pousse" : chaque niveau tire depuis le
+niveau supérieur, uniquement sur action humaine.
 
 ```
 Développeur  ──push──►  GitLab Central
-                              │
-                    [Bouton 1 Semaphore]
-                              │ git fetch/checkout
-                              ▼
-                      Serveur Hors-Prod
-                      (Git local #1)
-                              │
-                    [Bouton 2 Semaphore]
-                              │ scripts déploiement
-                              ▼
-                     App Hors-Prod ✓
-                              │
-                    [Bouton 3 Semaphore]
-                              │ git fetch/checkout (SSH)
-                              ▼
-                        Serveur Prod
-                        (Git local #2)
-                              │
-                    [Bouton 4 Semaphore]
-                              │ scripts déploiement
-                              ▼
-                       App Prod ✓
+                               │
+                     [Bouton 1 Semaphore]
+                               │ git fetch
+                               ▼
+                       Git Server HP (bare)
+                       /opt/git/myapp.git
+                               │
+                     [Bouton 2 Semaphore]
+                               │ git fetch + checkout
+                               ▼
+                       App Server HP (working tree)
+                       /opt/apps/myapp  → App Hors-Prod ✓
+                               │
+                     [Bouton 3 Semaphore]
+                               │ git fetch (connexion Git Prod → Git HP)
+                               ▼
+                       Git Server Prod (bare)
+                       /opt/git/myapp.git
+                               │
+                     [Bouton 4 Semaphore]
+                               │ git fetch + checkout
+                               ▼
+                       App Server Prod (working tree)
+                       /opt/apps/myapp  → App Production ✓
 ```
 
-Les 4 boutons dans Semaphore correspondent aux 4 Task Templates :
+Les 5 boutons dans Semaphore correspondent aux 5 Task Templates :
 
-| # | Bouton Semaphore       | Playbook Ansible              | Action                                          |
-|---|------------------------|-------------------------------|-------------------------------------------------|
-| 1 | Synchro Hors-Prod      | `01_sync_hors_prod.yml`       | Hors-Prod pull depuis GitLab                    |
-| 2 | Déployer Hors-Prod     | `02_deploy_hors_prod.yml`     | Exécution des scripts de déploiement Hors-Prod  |
-| 3 | Synchro Prod           | `03_sync_prod.yml`            | Prod pull depuis Hors-Prod (via SSH)            |
-| 4 | Déployer Prod          | `04_deploy_prod.yml`          | Exécution des scripts de déploiement Prod       |
+| # | Bouton Semaphore    | Playbook                 | Cible Ansible | Action                                      |
+|---|---------------------|--------------------------|---------------|---------------------------------------------|
+| 1 | Synchro Git HP      | `01_sync_git_hp.yml`     | `git_hp`      | Git HP tire depuis GitLab (bare fetch)      |
+| 2 | Déployer HP         | `02_deploy_hp.yml`       | `app_hp`      | App HP tire depuis Git HP + deploy          |
+| 3 | Synchro Git Prod    | `03_sync_git_prod.yml`   | `git_prod`    | Git Prod tire depuis Git HP (bare fetch)    |
+| 4 | Déployer Prod       | `04_deploy_prod.yml`     | `app_prod`    | App Prod tire depuis Git Prod + deploy      |
+| 5 | Rollback Prod       | `05_rollback_prod.yml`   | `app_prod`    | Checkout tag antérieur + redéploiement      |
 
-Pour le schéma d'architecture détaillé (avec diagrammes Mermaid), voir [docs/architecture.md](docs/architecture.md).
+Pour les schémas détaillés, voir [docs/architecture.md](docs/architecture.md).
 
 ---
 
-## 2. Structure du dépôt
+## 2. Infrastructure — 6 serveurs
+
+| Serveur         | Hostname                   | Zone       | Rôle                                   |
+|-----------------|----------------------------|------------|----------------------------------------|
+| GitLab Central  | gitlab.company.com         | Externe    | Stockage source (pas de CI/CD actif)   |
+| Git Server HP   | git-hp.company.com         | Hors-Prod  | Dépôt bare, miroir de GitLab           |
+| App Server HP   | app-hp.company.com         | Hors-Prod  | Application + working tree             |
+| Git Server Prod | git-prod.company.com       | Production | Dépôt bare, miroir de Git HP           |
+| App Server Prod | app-prod.company.com       | Production | Application + working tree             |
+| Orchestrateur   | semaphore.prod.company.com | Production | Ansible Semaphore, point d'entrée unique|
+
+**Distinction clé** : les serveurs Git (HP et Prod) ne font tourner aucune
+application. Ce sont des dépôts bare purs (`/opt/git/myapp.git`) qui servent
+exclusivement de relais Git entre les niveaux du pipeline.
+
+---
+
+## 3. Structure du dépôt
 
 ```
 CI-CD/
-├── README.md                          ← Ce fichier
+├── README.md
 ├── docs/
-│   ├── architecture.md                ← Schéma et explication détaillée
-│   ├── ssh-key-management.md          ← Gestion et répartition des clés SSH
-│   └── rollback-strategy.md           ← Procédure de rollback
+│   ├── architecture.md              ← Schémas Mermaid (6 serveurs, 8 clés SSH)
+│   ├── ssh-key-management.md        ← Guide complet des 8 paires de clés
+│   └── rollback-strategy.md         ← Stratégie de rollback par tag Git
 ├── ansible/
-│   ├── ansible.cfg                    ← Configuration Ansible globale
+│   ├── ansible.cfg
 │   ├── inventory/
-│   │   ├── hosts.yml                  ← Inventaire des serveurs
+│   │   ├── hosts.yml                ← 4 groupes : git_hp, app_hp, git_prod, app_prod
 │   │   └── group_vars/
-│   │       ├── all.yml                ← Variables communes
-│   │       ├── hors_prod.yml          ← Variables Hors-Prod
-│   │       └── prod.yml               ← Variables Production
+│   │       ├── all.yml              ← Variables communes
+│   │       ├── git_hp.yml           ← Git HP : bare, remote = GitLab, Clé E
+│   │       ├── app_hp.yml           ← App HP : working tree, remote = Git HP, Clé G
+│   │       ├── git_prod.yml         ← Git Prod : bare, remote = Git HP, Clé F
+│   │       └── app_prod.yml         ← App Prod : working tree, remote = Git Prod, Clé H
 │   ├── playbooks/
-│   │   ├── 01_sync_hors_prod.yml      ← Bouton 1 : Synchro Hors-Prod
-│   │   ├── 02_deploy_hors_prod.yml    ← Bouton 2 : Déployer Hors-Prod
-│   │   ├── 03_sync_prod.yml           ← Bouton 3 : Synchro Prod
-│   │   └── 04_deploy_prod.yml         ← Bouton 4 : Déployer Prod
+│   │   ├── 01_sync_git_hp.yml       ← Bouton 1 : Git HP fetch depuis GitLab
+│   │   ├── 02_deploy_hp.yml         ← Bouton 2 : App HP fetch + deploy
+│   │   ├── 03_sync_git_prod.yml     ← Bouton 3 : Git Prod fetch depuis Git HP
+│   │   ├── 04_deploy_prod.yml       ← Bouton 4 : App Prod fetch + deploy
+│   │   └── 05_rollback_prod.yml     ← Bouton 5 : Rollback App Prod
 │   └── roles/
-│       ├── git_sync/                  ← Rôle : synchronisation Git
-│       │   ├── tasks/main.yml
+│       ├── git_sync/
+│       │   ├── tasks/
+│       │   │   ├── main.yml         ← Dispatcher (bare vs working)
+│       │   │   ├── sync_bare.yml    ← Logique dépôt bare (Git HP, Git Prod)
+│       │   │   └── sync_working.yml ← Logique working tree (App HP, App Prod)
 │       │   └── defaults/main.yml
-│       └── deploy/                    ← Rôle : déploiement applicatif
-│           ├── tasks/main.yml
+│       └── deploy/
+│           ├── tasks/
+│           │   ├── main.yml
+│           │   ├── install_deps.yml
+│           │   ├── install_deps_python.yml
+│           │   ├── run_migrations.yml
+│           │   └── run_migrations_rollback.yml
 │           ├── defaults/main.yml
-│           └── templates/
-│               └── deploy.sh.j2
+│           └── templates/deploy.sh.j2
 └── semaphore/
-    └── project_config.md              ← Guide de configuration Semaphore
+    └── project_config.md            ← Guide configuration Semaphore (5 templates)
 ```
 
 ---
 
-## 3. Prérequis
+## 4. Prérequis
 
-### Sur l'Orchestrateur (Semaphore)
-- Ansible >= 2.14
-- Ansible Semaphore >= 2.9
-- Git >= 2.x
-- Accès SSH (sans mot de passe) vers Hors-Prod et Prod
+### Sur l'Orchestrateur
+- Ansible >= 2.14, Ansible Semaphore >= 2.9
+- 4 clés SSH privées (A, B, C, D) dans `~/.ssh/`
 
-### Sur Hors-Prod et Prod
-- Git >= 2.x
-- Python >= 3.8 (pour le module Ansible)
-- Utilisateur de déploiement dédié (ex: `deploy`)
-- Accès SSH depuis l'Orchestrateur
+### Sur Git HP et Git Prod
+- Git >= 2.x, Python >= 3.8
+- Répertoire `/opt/git/` pour les dépôts bare
+- Utilisateur `deploy` avec authorized_keys configurés
 
-### Sur Prod (supplémentaire)
-- Accès SSH vers Hors-Prod (pour git fetch)
-
-### Sur GitLab
-- Un utilisateur dédié de lecture (ex: `ci-reader`) avec accès aux dépôts
-- Clé SSH de lecture autorisée
-
----
-
-## 4. Configuration Git sur les serveurs cibles
-
-### Principes clés
-
-- **Fetch + Checkout** (jamais `git pull`) : évite les conflits de merge automatique.
-- **Branches fixes** : on déploie toujours depuis une branche définie (`main`, `release`...).
-- **Tags de version** : la synchro Prod checkout sur un tag signé ou un hash précis.
-- Le dépôt local est **en mode non-bare** (working tree actif) pour exécuter le code.
-
-### Hors-Prod : Remote = GitLab Central
-
-```bash
-# Initialisation (jouée une seule fois par Ansible au premier déploiement)
-git clone --origin gitlab git@gitlab.company.com:mygroup/myapp.git /opt/apps/myapp
-cd /opt/apps/myapp
-git remote set-url gitlab git@gitlab.company.com:mygroup/myapp.git
-```
-
-### Prod : Remote = Hors-Prod (via SSH)
-
-```bash
-# La Prod tire depuis le dépôt local de la Hors-Prod via SSH
-git clone --origin staging \
-  deploy@hors-prod.company.com:/opt/apps/myapp \
-  /opt/apps/myapp
-```
-
-> Le module `ansible.builtin.git` gère l'initialisation et les mises à jour.
-> Voir les rôles dans `ansible/roles/git_sync/`.
+### Sur App HP et App Prod
+- Git >= 2.x, Python >= 3.8
+- PHP >= 8.x (Composer) ou Python >= 3.8 (pip/venv) selon la stack
+- Service systemd de l'application
 
 ---
 
@@ -159,27 +155,34 @@ git clone --origin staging \
 
 Voir le guide détaillé : [docs/ssh-key-management.md](docs/ssh-key-management.md)
 
-### Résumé des paires de clés
+### Résumé des 8 paires de clés
 
-| Paire | De               | Vers            | Usage                              | Fichier clé privée                   |
-|-------|------------------|-----------------|------------------------------------|--------------------------------------|
-| A     | Orchestrateur    | Hors-Prod       | Ansible SSH (playbooks 1 & 2)      | `/home/semaphore/.ssh/id_orch_hp`    |
-| B     | Orchestrateur    | Prod            | Ansible SSH (playbooks 3 & 4)      | `/home/semaphore/.ssh/id_orch_prod`  |
-| C     | Prod             | Hors-Prod       | Git fetch Prod <- Hors-Prod        | `/home/deploy/.ssh/id_prod_hp_git`   |
-| D     | Hors-Prod        | GitLab          | Git fetch Hors-Prod <- GitLab      | `/home/deploy/.ssh/id_hp_gitlab`     |
+| Clé | Source        | Destination   | Type           |
+|-----|---------------|---------------|----------------|
+| A   | Orchestrateur | Git HP        | Ansible SSH    |
+| B   | Orchestrateur | App HP        | Ansible SSH    |
+| C   | Orchestrateur | Git Prod      | Ansible SSH    |
+| D   | Orchestrateur | App Prod      | Ansible SSH    |
+| E   | Git HP        | GitLab        | git (read-only)|
+| F   | Git Prod      | Git HP        | git (read-only)|
+| G   | App HP        | Git HP        | git (read-only)|
+| H   | App Prod      | Git Prod      | git (read-only)|
+
+Les clés E, F, G, H sont restreintes dans `authorized_keys` avec
+`command="git-upload-pack ..."` — elles ne permettent pas d'ouvrir un shell.
 
 ---
 
 ## 6. Playbooks Ansible
 
-Voir les fichiers dans `ansible/playbooks/` et `ansible/roles/`.
-
-### Logique des rôles
+Le rôle `git_sync` gère deux modes via la variable `git_repo_type` :
 
 ```
-roles/git_sync/   ->  fetch + checkout propre (sans merge)
-roles/deploy/     ->  install deps + migrations + reload service
+git_repo_type: bare     → sync_bare.yml    (Git HP, Git Prod)
+               working  → sync_working.yml (App HP, App Prod)
 ```
+
+Le rôle `deploy` gère les étapes applicatives (dépendances, migrations, reload).
 
 ---
 
@@ -187,27 +190,15 @@ roles/deploy/     ->  install deps + migrations + reload service
 
 Voir le guide détaillé : [semaphore/project_config.md](semaphore/project_config.md)
 
-### Les 4 Task Templates à créer
-
-| Template               | Playbook                   | Inventory    | Environnement |
-|------------------------|----------------------------|--------------|---------------|
-| Synchro Hors-Prod      | `01_sync_hors_prod.yml`    | `hosts.yml`  | `env_hp`      |
-| Déployer Hors-Prod     | `02_deploy_hors_prod.yml`  | `hosts.yml`  | `env_hp`      |
-| Synchro Prod           | `03_sync_prod.yml`         | `hosts.yml`  | `env_prod`    |
-| Déployer Prod          | `04_deploy_prod.yml`       | `hosts.yml`  | `env_prod`    |
-
 ---
 
 ## 8. Stratégie de Rollback
 
 Voir le guide détaillé : [docs/rollback-strategy.md](docs/rollback-strategy.md)
 
-### Résumé
-
-Le rollback repose sur des **tags Git versionnés** et un **5e Task Template** dans Semaphore :
-
-- `Rollback Prod` -> paramètre `target_version` (ex: `v1.4.2`) -> checkout du tag + redéploiement
-- Aucune perte de code, aucun besoin d'accès manuel au serveur
+- Tags Git `v1.x.y` créés après validation HP, avant synchro Prod
+- Bouton 5 "Rollback Prod" avec saisie de la version cible
+- Tag de sauvegarde `backup/prod-pre-deploy-*` créé automatiquement avant chaque déploiement
 
 ---
 
@@ -218,13 +209,13 @@ Le rollback repose sur des **tags Git versionnés** et un **5e Task Template** d
         |
 2. Responsable déploiement ouvre Semaphore
         |
-3. Clic "Synchro Hors-Prod"   -> Attente fin (vert OK)
-4. Clic "Déployer Hors-Prod"  -> Validation fonctionnelle sur Hors-Prod
+3. [Bouton 1] Synchro Git HP    -> Git HP fetch depuis GitLab   (OK)
+4. [Bouton 2] Déployer HP        -> App HP fetch depuis Git HP + deploy (OK)
         |
-5. Validation OK par l'équipe QA / PO
+5. Validation QA sur Hors-Prod (tests fonctionnels)
         |
-6. Clic "Synchro Prod"        -> Attente fin (vert OK)
-7. Clic "Déployer Prod"        -> Validation production
+6. [Bouton 3] Synchro Git Prod   -> Git Prod fetch depuis Git HP (OK)
+7. [Bouton 4] Déployer Prod      -> App Prod fetch depuis Git Prod + deploy (OK)
         |
-8. Si problème -> Clic "Rollback Prod" (saisir version précédente)
+8. Si problème -> [Bouton 5] Rollback Prod (saisir la version ex: v1.4.2)
 ```
