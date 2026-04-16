@@ -1,7 +1,7 @@
 ---
 # Valeurs par défaut du rôle deploy
 
-# Type d'application : php | python
+# Type d'application : php | python | java | nodejs | go
 app_type: php
 
 # Environnement cible
@@ -30,6 +30,28 @@ pip_args: "--no-deps"
 run_migrations: true
 migration_command_php: "php artisan migrate --force"
 migration_command_python: "python manage.py migrate"
+
+# ─── Java ──────────────────────────────────────────────────────────────────────
+java_home: /usr/lib/jvm/java-17
+mvn_path: /usr/bin/mvn
+mvn_args: "-q clean package -DskipTests"
+gradle_args: "build -x test"
+gradle_user_home: "/home/{{ app_user }}/.gradle"
+# java_migration_command: ""  # ex: "java -jar app.jar --spring.profiles.active=migration"
+
+# ─── Node.js ───────────────────────────────────────────────────────────────────
+npm_path: /usr/bin/npm
+npm_args: "--production"
+node_env: production
+nodejs_run_build: false
+npm_cache_dir: "/home/{{ app_user }}/.npm"
+# nodejs_migration_command: ""  # ex: "npx sequelize-cli db:migrate"
+
+# ─── Go ────────────────────────────────────────────────────────────────────────
+go_path: /opt/go
+go_build_args: "./..."
+go_vendor_mode: true    # true recommandé pour environnement sans internet (RHEL9)
+go_module_cache: /opt/go/pkg/mod
 
 # ─── Cache / Assets ────────────────────────────────────────────────────────────
 clear_cache: true

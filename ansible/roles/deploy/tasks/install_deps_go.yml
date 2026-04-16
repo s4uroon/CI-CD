@@ -1,0 +1,89 @@
+---
+# ─── Tâche : install_deps_go.yml ─────────────────────────────────────────────
+# Build des projets Go.
+# En Go, `go build` résout les modules ET compile en une seule commande.
+#
+# Prérequis hors-ligne (RHEL9 — CRITIQUE) :
+#   Le module Go télécharge les dépendances depuis internet par défaut.
+#   En environnement air-gapped, deux approches possibles :
+#
+#   Approche 1 — Vendor (recommandée, go_vendor_mode: true) :
+#     Exécuter `go mod vendor` sur une machine connectée,
+#     puis committer le répertoire vendor/ dans le dépôt.
+#     Le build utilisera UNIQUEMENT le vendor/ local (GOFLAGS=-mod=vendor).
+#
+#   Approche 2 — Cache GOMODCACHE transféré manuellement :
+#     Télécharger le cache sur une machine connectée :
+#       GOPATH=/tmp/go-cache go mod download
+#     Transférer /tmp/go-cache vers le serveur et définir go_module_cache.
+#
+# Variables configurables (defaults/main.yml) :
+#   go_path            : /opt/go
+#   go_build_args      : ./...
+#   go_vendor_mode     : true  (recommandé pour RHEL9 sans internet)
+#   go_module_cache    : /opt/go/pkg/mod
+#   go_output_dir      : (optionnel, sinon binaire dans app_root)
+# ─────────────────────────────────────────────────────────────────────────────
+
+- name: "Vérifier la présence de go.mod"
+  ansible.builtin.stat:
+    path: "{{ app_root }}/go.mod"
+  register: go_mod
+
+- name: "ERREUR — go.mod absent"
+  ansible.builtin.fail:
+    msg: |
+      ERREUR : Fichier go.mod absent dans {{ app_root }}.
+      Ce fichier est obligatoire pour les projets Go avec modules.
+  when: not go_mod.stat.exists
+
+- name: "Vérifier la présence du répertoire vendor/ (mode vendor)"
+  ansible.builtin.stat:
+    path: "{{ app_root }}/vendor"
+  register: vendor_dir
+  when: go_vendor_mode | default(true)
+
+- name: "AVERTISSEMENT — vendor/ absent en mode vendor"
+  ansible.builtin.debug:
+    msg: |
+      [WARN] go_vendor_mode=true mais le répertoire vendor/ est absent dans {{ app_root }}.
+      En environnement hors-ligne, le build va échouer si les modules ne sont pas
+      disponibles dans le cache GOMODCACHE.
+      Solution : exécutez `go mod vendor` sur une machine connectée et committez vendor/.
+  when:
+    - go_vendor_mode | default(true)
+    - not vendor_dir.stat.exists
+
+- name: "Build Go (mode vendor — GOFLAGS=-mod=vendor)"
+  ansible.builtin.command:
+    cmd: "go build {{ go_build_args | default('./...') }}"
+    chdir: "{{ app_root }}"
+  environment:
+    GOPATH: "{{ go_path | default('/opt/go') }}"
+    GOMODCACHE: "{{ go_module_cache | default('/opt/go/pkg/mod') }}"
+    GOFLAGS: "-mod=vendor"
+    HOME: "/home/{{ app_user }}"
+  when: go_vendor_mode | default(true)
+  changed_when: true
+  register: go_build_result
+
+- name: "  [OK] Go build (mode vendor) terminé"
+  ansible.builtin.debug:
+    msg: "  [OK] go build {{ go_build_args | default('./...') }} (mode vendor) terminé"
+  when: go_vendor_mode | default(true)
+
+- name: "Build Go (mode module cache)"
+  ansible.builtin.command:
+    cmd: "go build {{ go_build_args | default('./...') }}"
+    chdir: "{{ app_root }}"
+  environment:
+    GOPATH: "{{ go_path | default('/opt/go') }}"
+    GOMODCACHE: "{{ go_module_cache | default('/opt/go/pkg/mod') }}"
+    HOME: "/home/{{ app_user }}"
+  when: not (go_vendor_mode | default(true))
+  changed_when: true
+
+- name: "  [OK] Go build (mode cache) terminé"
+  ansible.builtin.debug:
+    msg: "  [OK] go build {{ go_build_args | default('./...') }} terminé"
+  when: not (go_vendor_mode | default(true))

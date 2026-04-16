@@ -1,0 +1,83 @@
+---
+# ─── Tâche : run_migrations_java.yml ─────────────────────────────────────────
+# Exécution des migrations de base de données pour les projets Java.
+# Détecte automatiquement Flyway, Liquibase, ou une commande personnalisée.
+#
+# Variables configurables :
+#   java_home                   : /usr/lib/jvm/java-17
+#   java_migration_command      : (optionnel) commande personnalisée
+#   flyway_config_path          : (optionnel) chemin vers flyway.conf
+# ─────────────────────────────────────────────────────────────────────────────
+
+- name: "Vérifier la présence de flyway.conf"
+  ansible.builtin.stat:
+    path: "{{ app_root }}/{{ flyway_config_path | default('flyway.conf') }}"
+  register: flyway_config
+
+- name: "Vérifier la présence de liquibase.properties"
+  ansible.builtin.stat:
+    path: "{{ app_root }}/liquibase.properties"
+  register: liquibase_config
+
+- name: "Migration Flyway"
+  ansible.builtin.command:
+    cmd: "flyway migrate"
+    chdir: "{{ app_root }}"
+  environment:
+    JAVA_HOME: "{{ java_home | default('/usr/lib/jvm/java-17') }}"
+  when: flyway_config.stat.exists
+  changed_when: true
+  register: flyway_result
+
+- name: "  [OK] Migration Flyway terminée"
+  ansible.builtin.debug:
+    msg: "  [OK] Flyway migrate terminé"
+  when: flyway_config.stat.exists
+
+- name: "Migration Liquibase"
+  ansible.builtin.command:
+    cmd: "liquibase update"
+    chdir: "{{ app_root }}"
+  environment:
+    JAVA_HOME: "{{ java_home | default('/usr/lib/jvm/java-17') }}"
+  when:
+    - not flyway_config.stat.exists
+    - liquibase_config.stat.exists
+  changed_when: true
+
+- name: "  [OK] Migration Liquibase terminée"
+  ansible.builtin.debug:
+    msg: "  [OK] Liquibase update terminé"
+  when:
+    - not flyway_config.stat.exists
+    - liquibase_config.stat.exists
+
+- name: "Migration commande personnalisée"
+  ansible.builtin.command:
+    cmd: "{{ java_migration_command }}"
+    chdir: "{{ app_root }}"
+  environment:
+    JAVA_HOME: "{{ java_home | default('/usr/lib/jvm/java-17') }}"
+  when:
+    - not flyway_config.stat.exists
+    - not liquibase_config.stat.exists
+    - java_migration_command is defined
+  changed_when: true
+
+- name: "  [OK] Migration commande personnalisée terminée"
+  ansible.builtin.debug:
+    msg: "  [OK] Migration Java (commande personnalisée) terminée"
+  when:
+    - not flyway_config.stat.exists
+    - not liquibase_config.stat.exists
+    - java_migration_command is defined
+
+- name: "  [INFO] Aucune migration Java configurée"
+  ansible.builtin.debug:
+    msg: |
+      [INFO] Aucun outil de migration détecté (flyway.conf, liquibase.properties)
+      et java_migration_command non défini. Migrations Java ignorées.
+  when:
+    - not flyway_config.stat.exists
+    - not liquibase_config.stat.exists
+    - java_migration_command is not defined
