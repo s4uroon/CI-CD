@@ -69,22 +69,24 @@ Développeur  ──push──►  GitLab Central
                    ╚═══════════════════════╝
 ```
 
-### Les 5 boutons Semaphore
+### Les 7 boutons Semaphore
 
-**Semaphore HP** (3 boutons) :
+**Semaphore HP** (4 boutons) :
 
 | # | Bouton          | Playbook                   | Action                                              |
 |---|-----------------|----------------------------|-----------------------------------------------------|
 | 1 | Synchro Git HP  | `hp/01_sync_git_hp.yml`    | Git+Ansible HP fetche depuis GitLab (bare)          |
 | 2 | Déployer HP     | `hp/02_deploy_hp.yml`      | App HP fetche depuis Git+Ansible HP + déploiement   |
 | 3 | Valider HP      | `hp/03_validate_hp.yml`    | Pose le tag `validated/hp/<repo>` sur bare HP       |
+| 4 | Rollback HP     | `hp/04_rollback_hp.yml`    | Retourne l'App HP à un tag ou commit précédent      |
 
-**Semaphore Prod** (2 boutons) :
+**Semaphore Prod** (3 boutons) :
 
 | # | Bouton           | Playbook                    | Action                                              |
 |---|------------------|-----------------------------|-----------------------------------------------------|
 | 1 | Synchro Git Prod | `prod/01_sync_git_prod.yml` | Vérifie flag HP, puis fetche depuis Git+Ansible HP  |
 | 2 | Déployer Prod    | `prod/02_deploy_prod.yml`   | Sauvegarde BDD + déploiement sur App Prod           |
+| 3 | Rollback Prod    | `prod/03_rollback_prod.yml` | Sauvegarde BDD + retour à une version précédente    |
 
 > Le **Bouton 1 Prod est bloqué** si le Bouton 3 HP n'a pas été exécuté.
 > Voir [docs/validation-flag.md](docs/validation-flag.md).
@@ -98,10 +100,10 @@ Développeur  ──push──►  GitLab Central
 | GitLab Central       | gitlab.company.com            | Externe/DMZ   | Stockage source de vérité                         |
 | Semaphore HP         | semaphore-hp.company.com      | Hors-Prod     | Semaphore UI + Ansible control node HP            |
 | Git+Ansible HP       | git-ansible-hp.company.com    | Hors-Prod     | Dépôt bare miroir + Ansible installé              |
-| App Server(s) HP     | app[n]-hp.company.com         | Hors-Prod     | N serveurs applicatifs HP (PHP/Python)            |
+| App Server(s) HP     | app[n]-hp.company.com         | Hors-Prod     | N serveurs applicatifs HP (PHP/Python/Node.js/Java/Go) |
 | Semaphore Prod       | semaphore-prod.company.com    | Production    | Semaphore UI + Ansible control node Prod          |
 | Git+Ansible Prod     | git-ansible-prod.company.com  | Production    | Dépôt bare miroir + Ansible installé              |
-| App Server(s) Prod   | app[n]-prod.company.com       | Production    | N serveurs applicatifs Prod (PHP/Python)          |
+| App Server(s) Prod   | app[n]-prod.company.com       | Production    | N serveurs applicatifs Prod (PHP/Python/Node.js/Java/Go) |
 
 **Point clé** : Semaphore HP est dans la zone HP (pas dans la zone Prod).
 Les deux Semaphore sont des instances indépendantes, chacune avec son propre
@@ -115,10 +117,13 @@ inventory et ses propres clés SSH.
 CI-CD/
 ├── README.md
 ├── docs/
-│   ├── architecture.md              ← Schémas Mermaid + décisions d'architecture
-│   ├── ssh-key-management.md        ← Guide complet des 8 paires de clés SSH
-│   ├── validation-flag.md           ← Mécanisme flag git HP → Prod
-│   └── rollback-strategy.md         ← Stratégie de rollback par tag Git
+│   ├── architecture.md                  ← Schémas Mermaid + décisions d'architecture
+│   ├── ldap-https-configuration.md      ← Configuration LDAP et HTTPS
+│   ├── notifications.md                 ← Configuration des notifications Semaphore
+│   ├── offline-installation-rhel9.md    ← Installation hors-ligne sur RHEL 9
+│   ├── rollback-strategy.md             ← Stratégie de rollback par tag Git
+│   ├── ssh-key-management.md            ← Guide complet des 8 paires de clés SSH
+│   └── validation-flag.md               ← Mécanisme flag git HP → Prod
 ├── ansible/
 │   ├── ansible.cfg
 │   ├── inventory/
@@ -140,10 +145,12 @@ CI-CD/
 │   │   ├── hp/
 │   │   │   ├── 01_sync_git_hp.yml   ← Bouton 1 HP : fetch GitLab → bare HP
 │   │   │   ├── 02_deploy_hp.yml     ← Bouton 2 HP : fetch + deploy App HP
-│   │   │   └── 03_validate_hp.yml   ← Bouton 3 HP : tag validated/hp/<repo>
+│   │   │   ├── 03_validate_hp.yml   ← Bouton 3 HP : tag validated/hp/<repo>
+│   │   │   └── 04_rollback_hp.yml   ← Bouton 4 HP : rollback App HP vers un tag
 │   │   └── prod/
 │   │       ├── 01_sync_git_prod.yml ← Bouton 1 Prod : check flag + fetch HP → bare Prod
-│   │       └── 02_deploy_prod.yml   ← Bouton 2 Prod : BDD backup + deploy App Prod
+│   │       ├── 02_deploy_prod.yml   ← Bouton 2 Prod : BDD backup + deploy App Prod
+│   │       └── 03_rollback_prod.yml ← Bouton 3 Prod : BDD backup + rollback App Prod
 │   └── roles/
 │       ├── git_sync/
 │       │   ├── tasks/
@@ -154,9 +161,14 @@ CI-CD/
 │       └── deploy/
 │           └── tasks/
 │               ├── main.yml
-│               ├── install_deps.yml
-│               ├── install_deps_python.yml
-│               ├── run_migrations.yml
+│               ├── install_deps.yml              ← PHP (Composer)
+│               ├── install_deps_python.yml       ← Python (pip/venv)
+│               ├── install_deps_nodejs.yml       ← Node.js (npm)
+│               ├── install_deps_java.yml         ← Java (Maven/Gradle)
+│               ├── install_deps_go.yml           ← Go (go build)
+│               ├── run_migrations.yml            ← PHP / Python
+│               ├── run_migrations_nodejs.yml     ← Node.js
+│               ├── run_migrations_java.yml       ← Java
 │               └── run_migrations_rollback.yml
 └── semaphore/
     ├── hp_project_config.md         ← Guide configuration Semaphore HP (3 boutons)
@@ -182,7 +194,12 @@ CI-CD/
 
 ### Sur App HP et App Prod
 - Git >= 2.x
-- PHP >= 8.x (Composer) ou Python >= 3.8 (pip/venv) selon la stack
+- Selon la stack applicative (un ou plusieurs) :
+  - PHP >= 8.x (Composer)
+  - Python >= 3.8 (pip/venv)
+  - Node.js >= 18.x (npm)
+  - Java >= 17 (Maven ou Gradle)
+  - Go >= 1.21 (go build)
 - Service systemd de l'application
 - PostgreSQL client (`pg_dump`) pour les sauvegardes avant déploiement Prod
 
@@ -221,7 +238,7 @@ serveurs cibles** (configurable indépendamment pour HP et Prod).
 repo_name: myapp
 git_remote_url: "git@gitlab.company.com:mygroup/myapp.git"
 git_branch: main
-app_type: php          # "php", "python" ou "static"
+app_type: php          # "php", "python", "nodejs", "java", "go" ou "static"
 
 app_root: "/opt/apps/myapp"
 app_service_name: myapp
@@ -269,8 +286,8 @@ explicites et résumé visuel par étape.
 ## 8. Configuration d'Ansible Semaphore
 
 Voir les guides détaillés :
-- [semaphore/hp_project_config.md](semaphore/hp_project_config.md) — Semaphore HP (3 boutons)
-- [semaphore/prod_project_config.md](semaphore/prod_project_config.md) — Semaphore Prod (2 boutons)
+- [semaphore/hp_project_config.md](semaphore/hp_project_config.md) — Semaphore HP (4 boutons)
+- [semaphore/prod_project_config.md](semaphore/prod_project_config.md) — Semaphore Prod (3 boutons)
 
 ---
 
@@ -297,11 +314,17 @@ BLOQUE : Actions requises sur Semaphore HP :
 
 Voir le guide détaillé : [docs/rollback-strategy.md](docs/rollback-strategy.md)
 
+**Rollback HP (Bouton 4 HP)** :
+- Retourne l'application HP à un tag ou commit précédent (sans sauvegarde BDD)
+- Variables Semaphore : `repo_name` + `rollback_tag` (tag sémantique, tag backup, ou hash court)
+- Après un rollback HP, re-exécuter le **Bouton 3 HP** pour re-valider avant tout déploiement Prod
+
+**Rollback Prod (Bouton 3 Prod)** :
 - Tag de sauvegarde `backup/prod-pre-deploy-<date>-<heure>` créé automatiquement
   avant chaque déploiement Prod (dans le Bouton 2 Prod)
-- Dump PostgreSQL créé avant chaque migration Prod
-- Pour rollback : relancer le Bouton 2 Prod avec `git_tag=v1.x.y` dans les
-  extra variables Semaphore
+- Dump PostgreSQL créé avant chaque migration et avant chaque rollback Prod
+- Pour rollback : lancer le **Bouton 3 Prod** avec `repo_name` et `rollback_tag`
+  (ex: `backup/prod-pre-deploy-2026-04-09-14-30-00` ou `v1.x.y`)
 
 ---
 
@@ -329,6 +352,11 @@ Dev push sur GitLab (branche main ou tag release)
   → Pose le tag git validated/hp/myapp
   → DÉBLOQUE le déploiement en Production
 
+[Bouton 4 HP] Rollback HP  ← si problème après déploiement HP (optionnel)
+  → Survey Variables : repo_name = myapp, rollback_tag = v1.2.0
+  → App HP revenue à la version cible
+  → Si déploiement Prod souhaité : re-exécuter Bouton 3 HP
+
 ═══════ ZONE PROD (Semaphore Prod) ════════════════
 
 [Bouton 1 Prod] Synchro Git Prod
@@ -342,4 +370,8 @@ Dev push sur GitLab (branche main ou tag release)
   → Sauvegarde BDD (pg_dump), git tag backup/prod-pre-deploy-*
   → App Prod fetche + checkout + deps + migrations + reload + health check
   → Rolling deploy (serial: 1) — un serveur à la fois
+
+[Bouton 3 Prod] Rollback Prod  ← si problème après déploiement Prod (optionnel)
+  → Survey Variables : repo_name = myapp, rollback_tag = backup/prod-pre-deploy-*
+  → Sauvegarde BDD pré-rollback, checkout + deps + rollback migrations + reload
 ```
