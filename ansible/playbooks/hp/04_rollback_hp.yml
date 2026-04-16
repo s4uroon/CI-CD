@@ -1,0 +1,319 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════════
+# SEMAPHORE HP — BOUTON 4 : Rollback HP
+# ═══════════════════════════════════════════════════════════════════════════════
+# Cible   : Serveurs applicatifs HP (liste définie dans repos/<repo_name>.yml)
+# Action  : Retourne l'application vers un tag ou commit précédent sur HP.
+#           Réinstalle les dépendances, effectue un rollback des migrations
+#           (si migrations/rollback.sh présent), redémarre le service.
+#
+# Survey Variables Semaphore :
+#   repo_name    (ex: myapp)            — obligatoire
+#   rollback_tag (ex: v1.3.0 ou hash)  — obligatoire
+#
+# Flux :
+#   Semaphore HP --SSH(Clé A)--> Git+Ansible HP  [chargement config + add_host]
+#   Semaphore HP --SSH(Clé C)--> App HP servers
+#     App HP : git checkout tags/<rollback_tag> + deps + rollback migrations + reload
+#
+# IMPORTANT : Le tag doit exister dans le bare HP.
+#   - Tags sémantiques : v1.3.0, v1.2.0, etc.
+#   - Tags de backup   : backup/prod-pre-deploy-2026-04-09-14-30-00
+#   - Hash court       : a1b2c3d (7 à 40 caractères hexadécimaux)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Play 1 : Charger la config et valider le tag cible ───────────────────────
+- name: "[HP] Chargement configuration et validation du tag de rollback"
+  hosts: git_ansible_hp
+  gather_facts: true
+  become: false
+
+  vars:
+    repo_config_file: "{{ playbook_dir }}/../../repos/{{ repo_name }}.yml"
+
+  tasks:
+    - name: "Vérifier que repo_name est fourni"
+      ansible.builtin.fail:
+        msg: "ERREUR : La variable 'repo_name' est obligatoire."
+      when: repo_name is not defined or repo_name | trim == ""
+
+    - name: "Vérifier que rollback_tag est fourni"
+      ansible.builtin.fail:
+        msg: "ERREUR : La variable 'rollback_tag' est obligatoire (ex: v1.3.0 ou un hash court)."
+      when: rollback_tag is not defined or rollback_tag | trim == ""
+
+    - name: "Charger la configuration du dépôt {{ repo_name }}"
+      ansible.builtin.include_vars:
+        file: "{{ repo_config_file }}"
+
+    - name: "Déterminer si rollback_tag est un hash ou un tag nommé"
+      ansible.builtin.set_fact:
+        is_commit_hash: "{{ rollback_tag | regex_search('^[0-9a-f]{7,40}$') is not none }}"
+
+    - name: "Référence git calculée"
+      ansible.builtin.set_fact:
+        checkout_ref: "{{ 'tags/' + rollback_tag if not (rollback_tag | regex_search('^[0-9a-f]{7,40}$') is not none) else rollback_tag }}"
+
+    - name: "Vérifier que le tag/commit existe dans le bare HP"
+      ansible.builtin.command:
+        cmd: "git -C {{ git_bare_base | default('/opt/git') }}/{{ repo_name }}.git cat-file -t {{ rollback_tag }}"
+      register: tag_check
+      changed_when: false
+      failed_when: tag_check.rc != 0
+
+    - name: "ERREUR — tag introuvable dans le bare HP"
+      ansible.builtin.fail:
+        msg: |
+          ERREUR : Le tag ou commit '{{ rollback_tag }}' n'existe pas dans
+          le bare HP (/opt/git/{{ repo_name }}.git).
+
+          Vérifiez les tags disponibles :
+            git -C /opt/git/{{ repo_name }}.git tag -l
+
+          Ou consultez les backups disponibles :
+            git -C /opt/git/{{ repo_name }}.git tag -l 'backup/*'
+      when: tag_check.rc != 0
+
+    - name: "Ajouter dynamiquement les serveurs HP cibles au groupe rollback_targets_hp"
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups: rollback_targets_hp
+        repo_name: "{{ repo_name }}"
+        app_root: "{{ app_root }}"
+        app_type: "{{ app_type }}"
+        app_service_name: "{{ app_service_name }}"
+        git_remote_url: "deploy@{{ git_server_host }}:{{ git_bare_base | default('/opt/git') }}/{{ repo_name }}.git"
+        rollback_tag: "{{ rollback_tag }}"
+        checkout_ref: "{{ checkout_ref }}"
+        run_migrations: "{{ run_migrations | default(true) }}"
+      loop: "{{ app_servers_hp }}"
+
+    - name: "Résumé du rollback planifié"
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "  BOUTON 4 — ROLLBACK HP"
+          - "  Dépôt        : {{ repo_name }}"
+          - "  Tag cible    : {{ rollback_tag }}"
+          - "  Référence    : {{ checkout_ref }}"
+          - "  Serveurs HP  : {{ app_servers_hp | join(', ') }}"
+          - "  ATTENTION : Cette action revient à une version précédente."
+          - "============================================================"
+
+# ─── Play 2 : Rollback sur les serveurs App HP ────────────────────────────────
+- name: "[HP] Rollback sur les serveurs applicatifs HP"
+  hosts: rollback_targets_hp
+  gather_facts: true
+  become: false
+  serial: 1    # Rollback séquentiel serveur par serveur
+
+  pre_tasks:
+    - name: "--- [{{ inventory_hostname }}] Debut rollback HP ---"
+      ansible.builtin.debug:
+        msg:
+          - "  Serveur      : {{ inventory_hostname }}"
+          - "  Dépôt        : {{ repo_name }}"
+          - "  Tag cible    : {{ rollback_tag }}"
+          - "  Répertoire   : {{ app_root }}"
+
+    - name: "Enregistrer le commit actuel avant rollback"
+      ansible.builtin.command:
+        cmd: git log --oneline -1
+        chdir: "{{ app_root }}"
+      register: commit_before
+      changed_when: false
+      failed_when: false
+
+    - name: "Enregistrer le tag actuel avant rollback"
+      ansible.builtin.command:
+        cmd: "git describe --tags --exact-match HEAD"
+        chdir: "{{ app_root }}"
+      register: tag_before
+      changed_when: false
+      failed_when: false
+
+    - name: "État avant rollback"
+      ansible.builtin.debug:
+        msg:
+          - "  Commit actuel : {{ commit_before.stdout | default('(inconnu)') }}"
+          - "  Tag actuel    : {{ tag_before.stdout | default('(aucun tag)') }}"
+
+  tasks:
+    - name: "--- Etape 1/4 : Mise à jour du bare local (fetch) ---"
+      block:
+        - name: "git fetch depuis Git+Ansible HP (tags inclus)"
+          ansible.builtin.command:
+            cmd: "git fetch origin --prune --tags --force"
+            chdir: "{{ app_root }}"
+          environment:
+            GIT_SSH_COMMAND: "ssh -i {{ git_ssh_key_path }} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+
+        - name: "  [OK] Etape 1/4 : Fetch terminé"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 1/4 : Fetch depuis Git+Ansible HP terminé"
+
+      rescue:
+        - name: "ERREUR fetch git"
+          ansible.builtin.fail:
+            msg: |
+              ERREUR Etape 1/4 : git fetch échoué sur {{ inventory_hostname }}.
+              Vérifiez la Clé D et que Git+Ansible HP est accessible.
+
+    - name: "--- Etape 2/4 : Checkout vers la version cible ---"
+      block:
+        - name: "git checkout vers {{ checkout_ref }}"
+          ansible.builtin.command:
+            cmd: "git checkout --force {{ checkout_ref }}"
+            chdir: "{{ app_root }}"
+
+        - name: "Vérifier le commit après checkout"
+          ansible.builtin.command:
+            cmd: git log --oneline -1
+            chdir: "{{ app_root }}"
+          register: commit_after
+          changed_when: false
+
+        - name: "  [OK] Etape 2/4 : Checkout effectué — {{ commit_after.stdout }}"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 2/4 : Checkout vers '{{ rollback_tag }}' — {{ commit_after.stdout }}"
+
+      rescue:
+        - name: "ERREUR checkout"
+          ansible.builtin.fail:
+            msg: |
+              ERREUR Etape 2/4 : Checkout vers '{{ rollback_tag }}' échoué.
+              Vérifiez que le tag existe dans le bare HP et réessayez.
+
+    - name: "--- Etape 3/4 : Réinstallation des dépendances ---"
+      block:
+        - name: "Composer (PHP)"
+          ansible.builtin.command:
+            cmd: "{{ composer_path }} install {{ composer_args }}"
+            chdir: "{{ app_root }}"
+          environment:
+            HOME: "/home/{{ app_user }}"
+          when: app_type == "php"
+
+        - name: "pip (Python)"
+          ansible.builtin.pip:
+            requirements: "{{ app_root }}/requirements.txt"
+            virtualenv: "{{ python_venv_path | default(app_root + '/.venv') }}"
+          when: app_type == "python"
+
+        - name: "npm (Node.js)"
+          ansible.builtin.command:
+            cmd: "npm ci {{ npm_args | default('--production') }}"
+            chdir: "{{ app_root }}"
+          environment:
+            NODE_ENV: production
+          when: app_type == "nodejs"
+
+        - name: "Maven (Java)"
+          ansible.builtin.command:
+            cmd: "mvn {{ mvn_args | default('-q clean package -DskipTests') }}"
+            chdir: "{{ app_root }}"
+          environment:
+            JAVA_HOME: "{{ java_home | default('/usr/lib/jvm/java-17') }}"
+          when:
+            - app_type == "java"
+            - ansible_check_mode is not defined or not ansible_check_mode
+          changed_when: true
+
+        - name: "go build (Go)"
+          ansible.builtin.command:
+            cmd: "go build {{ go_build_args | default('./...') }}"
+            chdir: "{{ app_root }}"
+          environment:
+            GOPATH: "{{ go_path | default('/opt/go') }}"
+            GOFLAGS: "{{ '-mod=vendor' if go_vendor_mode | default(true) else '' }}"
+          when: app_type == "go"
+          changed_when: true
+
+        - name: "  [OK] Etape 3/4 : Dépendances réinstallées"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 3/4 : Dépendances réinstallées pour la version {{ rollback_tag }}"
+
+      rescue:
+        - name: "ERREUR réinstallation dépendances"
+          ansible.builtin.fail:
+            msg: "ERREUR Etape 3/4 : Réinstallation des dépendances échouée sur {{ inventory_hostname }}."
+
+    - name: "--- Etape 4/4 : Rollback migrations + redémarrage du service ---"
+      block:
+        - name: "Vérifier la présence d'un script de rollback migrations"
+          ansible.builtin.stat:
+            path: "{{ app_root }}/migrations/rollback.sh"
+          register: rollback_script
+
+        - name: "Rollback des migrations (si script présent)"
+          ansible.builtin.command:
+            cmd: "bash migrations/rollback.sh {{ rollback_tag }}"
+            chdir: "{{ app_root }}"
+          when:
+            - rollback_script.stat.exists
+            - run_migrations | default(true)
+          register: migration_rollback_result
+          changed_when: true
+
+        - name: "  [INFO] Pas de script rollback migrations (normal si l'application n'en fournit pas)"
+          ansible.builtin.debug:
+            msg: "  [INFO] Etape 4/4 : Aucun script migrations/rollback.sh — rollback migrations ignoré."
+          when: not rollback_script.stat.exists
+
+        - name: "Redémarrer le service applicatif"
+          ansible.builtin.systemd:
+            name: "{{ app_service_name }}"
+            state: restarted
+            daemon_reload: true
+          become: true
+          become_user: root
+
+        - name: "Attendre stabilisation"
+          ansible.builtin.pause:
+            seconds: 3
+
+        - name: "Vérifier que le service est actif"
+          ansible.builtin.systemd:
+            name: "{{ app_service_name }}"
+          register: service_status
+          become: true
+          become_user: root
+          failed_when: service_status.status.ActiveState != "active"
+
+        - name: "  [OK] Etape 4/4 : Service actif après rollback"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 4/4 : Service {{ app_service_name }} — ACTIF (version {{ rollback_tag }})"
+
+      rescue:
+        - name: "ERREUR service non démarré après rollback"
+          ansible.builtin.fail:
+            msg: |
+              ERREUR Etape 4/4 : Le service {{ app_service_name }} n'a pas démarré.
+              Vérifiez les logs : journalctl -u {{ app_service_name }} -n 50
+
+  post_tasks:
+    - name: "Résumé rollback {{ inventory_hostname }}"
+      ansible.builtin.debug:
+        msg:
+          - "  ✓ {{ inventory_hostname }} — ROLLBACK HP OK"
+          - "  Avant    : {{ commit_before.stdout | default('N/A') }}"
+          - "  Après    : {{ commit_after.stdout | default('N/A') }}"
+          - "  Version  : {{ rollback_tag }}"
+          - "  Service  : {{ app_service_name }} ACTIF"
+
+# ─── Play 3 : Résumé global ────────────────────────────────────────────────────
+- name: "[HP] Résumé global du rollback"
+  hosts: git_ansible_hp
+  gather_facts: false
+
+  tasks:
+    - name: "Résumé final"
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "  ROLLBACK HP TERMINE"
+          - "  Dépôt    : {{ repo_name }}"
+          - "  Version  : {{ rollback_tag }}"
+          - "  ATTENTION : L'environnement HP est revenu à la version {{ rollback_tag }}."
+          - "  Si vous souhaitez déployer en Production, re-validez avec le Bouton 3."
+          - "============================================================"

@@ -85,7 +85,7 @@ Créer l'entrée dans **Environment** :
 
 ---
 
-## 6. Task Templates — Les 3 boutons HP
+## 6. Task Templates — Les 4 boutons HP
 
 ### Bouton 1 — Synchro Git HP
 
@@ -160,6 +160,38 @@ Créer l'entrée dans **Environment** :
 
 ---
 
+### Bouton 4 — Rollback HP
+
+| Champ            | Valeur                                          |
+|------------------|--------------------------------------------------|
+| Name             | `[HP] 4 — Rollback HP`                          |
+| Playbook         | `ansible/playbooks/hp/04_rollback_hp.yml`        |
+| Inventory        | `inventory-hp`                                   |
+| Repository       | `ci-cd-playbooks-hp`                             |
+| Environment      | `env-hp-default`                                 |
+| SSH Key          | `ssh-key-A-semaphore-to-git-hp`                  |
+| Description      | Retourne l'application HP à une version précédente |
+
+**Survey Variables** :
+
+| Variable       | Titre affiché              | Description                                                        | Requis |
+|----------------|----------------------------|--------------------------------------------------------------------|--------|
+| `repo_name`    | Nom du dépôt               | Ex: myapp, api-backend                                             | Oui    |
+| `rollback_tag` | Tag ou commit cible        | Ex: v1.3.0, backup/prod-pre-deploy-2026-04-09-14-30-00, ou hash court | Oui    |
+
+> **Note** : Le tag doit exister dans le miroir bare HP.
+> Pour lister les tags disponibles, exécutez sur `git-ansible-hp` :
+> ```bash
+> git -C /opt/git/<repo_name>.git tag -l
+> git -C /opt/git/<repo_name>.git tag -l 'backup/*'
+> ```
+>
+> **Attention** : Après un rollback HP, si vous souhaitez déployer la version
+> rollbackée en Production, vous devez re-exécuter le **Bouton 3 — Valider HP**
+> pour recréer le flag de validation sur la version cible.
+
+---
+
 ## 7. Ordre d'exécution recommandé
 
 ```
@@ -174,6 +206,13 @@ Créer l'entrée dans **Environment** :
 3. [Bouton 3] Valider HP         → survey: repo_name = myapp
    → Résultat : tag validated/hp/myapp posé
    → Semaphore Prod peut maintenant démarrer
+```
+
+**En cas de problème après déploiement HP :**
+```
+4. [Bouton 4] Rollback HP        → survey: repo_name = myapp, rollback_tag = v1.2.0
+   → Résultat : application revenue à la version v1.2.0 sur App HP
+   → Si déploiement Prod souhaité : re-exécuter Bouton 3 sur la version rollbackée
 ```
 
 ---

@@ -1,0 +1,407 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════════
+# SEMAPHORE PROD — BOUTON 3 : Rollback Prod
+# ═══════════════════════════════════════════════════════════════════════════════
+# Cible   : Serveurs applicatifs Prod (liste définie dans repos/<repo_name>.yml)
+# Action  : Sauvegarde BDD, retourne vers un tag ou commit précédent en Prod,
+#           réinstalle les dépendances, tente un rollback des migrations,
+#           redémarre le service avec health check.
+#
+# Survey Variables Semaphore :
+#   repo_name    (ex: myapp)            — obligatoire
+#   rollback_tag (ex: v1.3.0 ou hash)  — obligatoire
+#
+# Flux :
+#   Semaphore Prod --SSH(Clé E)--> Git+Ansible Prod  [config + add_host]
+#   Semaphore Prod --SSH(Clé G)--> App Prod servers
+#     App Prod : backup BDD + git checkout + deps + rollback migrations + reload
+#
+# IMPORTANT : Le tag doit exister dans le bare PROD.
+#   Si le tag n'existe que dans HP (validated/hp/<repo>), lancez d'abord
+#   le Bouton 1 Prod (Synchro Git Prod) pour le transférer vers Prod.
+#
+#   Tags disponibles en Prod :
+#     git -C /opt/git/<repo>.git tag -l
+#     git -C /opt/git/<repo>.git tag -l 'backup/prod-pre-*'
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Play 1 : Charger la config et valider le tag cible ───────────────────────
+- name: "[PROD] Chargement configuration et validation du tag de rollback"
+  hosts: git_ansible_prod
+  gather_facts: true
+  become: false
+
+  vars:
+    repo_config_file: "{{ playbook_dir }}/../../repos/{{ repo_name }}.yml"
+
+  tasks:
+    - name: "Vérifier que repo_name est fourni"
+      ansible.builtin.fail:
+        msg: "ERREUR : La variable 'repo_name' est obligatoire."
+      when: repo_name is not defined or repo_name | trim == ""
+
+    - name: "Vérifier que rollback_tag est fourni"
+      ansible.builtin.fail:
+        msg: "ERREUR : La variable 'rollback_tag' est obligatoire (ex: v1.3.0 ou backup/prod-pre-deploy-...)."
+      when: rollback_tag is not defined or rollback_tag | trim == ""
+
+    - name: "Charger la configuration du dépôt {{ repo_name }}"
+      ansible.builtin.include_vars:
+        file: "{{ repo_config_file }}"
+
+    - name: "Déterminer si rollback_tag est un hash ou un tag nommé"
+      ansible.builtin.set_fact:
+        checkout_ref: "{{ 'tags/' + rollback_tag if not (rollback_tag | regex_search('^[0-9a-f]{7,40}$') is not none) else rollback_tag }}"
+
+    - name: "Vérifier que le tag/commit existe dans le bare PROD"
+      ansible.builtin.command:
+        cmd: "git -C {{ git_bare_base | default('/opt/git') }}/{{ repo_name }}.git cat-file -t {{ rollback_tag }}"
+      register: tag_check
+      changed_when: false
+      failed_when: false
+
+    - name: "ERREUR — tag introuvable dans le bare Prod"
+      ansible.builtin.fail:
+        msg: |
+          ERREUR : Le tag ou commit '{{ rollback_tag }}' n'existe pas dans
+          le bare Prod (/opt/git/{{ repo_name }}.git).
+
+          Si ce tag est issu de HP (ex: validated/hp/{{ repo_name }}),
+          lancez d'abord le Bouton 1 Prod (Synchro Git Prod) pour le transférer.
+
+          Tags disponibles en Prod :
+            git -C /opt/git/{{ repo_name }}.git tag -l
+
+          Backups de sécurité disponibles :
+            git -C /opt/git/{{ repo_name }}.git tag -l 'backup/prod-pre-*'
+      when: tag_check.rc != 0
+
+    - name: "Ajouter dynamiquement les serveurs Prod cibles"
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups: rollback_targets_prod
+        repo_name: "{{ repo_name }}"
+        app_root: "{{ app_root }}"
+        app_type: "{{ app_type }}"
+        app_service_name: "{{ app_service_name }}"
+        git_remote_url: "deploy@{{ git_server_host }}:{{ git_bare_base | default('/opt/git') }}/{{ repo_name }}.git"
+        rollback_tag: "{{ rollback_tag }}"
+        checkout_ref: "{{ checkout_ref }}"
+        run_migrations: "{{ run_migrations | default(true) }}"
+        db_host: "{{ db_host_prod | default('localhost') }}"
+        db_name: "{{ db_name_prod | default(repo_name + '_prod') }}"
+        db_user: "{{ db_user_prod | default('app_user') }}"
+      loop: "{{ app_servers_prod }}"
+
+    - name: "Résumé du rollback Prod planifié"
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "  BOUTON 3 PROD — ROLLBACK PRODUCTION"
+          - "  Dépôt        : {{ repo_name }}"
+          - "  Tag cible    : {{ rollback_tag }}"
+          - "  Référence    : {{ checkout_ref }}"
+          - "  Serveurs     : {{ app_servers_prod | join(', ') }}"
+          - "  ATTENTION : Une sauvegarde BDD sera créée avant le rollback."
+          - "  La BDD sera votre filet de sécurité si les migrations posent"
+          - "  problème. Vérifiez /opt/backups/ après l'exécution."
+          - "============================================================"
+
+# ─── Play 2 : Rollback sur les serveurs App Prod ──────────────────────────────
+- name: "[PROD] Rollback sur les serveurs applicatifs Prod"
+  hosts: rollback_targets_prod
+  gather_facts: true
+  become: false
+  serial: 1    # Rollback séquentiel serveur par serveur
+
+  pre_tasks:
+    - name: "--- [{{ inventory_hostname }}] Debut rollback Production ---"
+      ansible.builtin.debug:
+        msg:
+          - "  Serveur      : {{ inventory_hostname }}"
+          - "  Dépôt        : {{ repo_name }}"
+          - "  Tag cible    : {{ rollback_tag }}"
+          - "  Répertoire   : {{ app_root }}"
+
+    - name: "Enregistrer le commit actuel avant rollback"
+      ansible.builtin.command:
+        cmd: git log --oneline -1
+        chdir: "{{ app_root }}"
+      register: commit_before
+      changed_when: false
+      failed_when: false
+
+    - name: "Enregistrer le tag actuel avant rollback"
+      ansible.builtin.command:
+        cmd: "git describe --tags --exact-match HEAD"
+        chdir: "{{ app_root }}"
+      register: tag_before
+      changed_when: false
+      failed_when: false
+
+    - name: "État avant rollback"
+      ansible.builtin.debug:
+        msg:
+          - "  Commit actuel : {{ commit_before.stdout | default('(inconnu)') }}"
+          - "  Tag actuel    : {{ tag_before.stdout | default('(aucun tag)') }}"
+
+    - name: "Créer le répertoire de sauvegarde BDD"
+      ansible.builtin.file:
+        path: "{{ db_backup_dir | default('/opt/backups') }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0750"
+      become: true
+      become_user: root
+
+  tasks:
+    - name: "--- Etape 0/5 : Sauvegarde BDD + tag git avant rollback ---"
+      block:
+        - name: "Dump PostgreSQL avant rollback"
+          ansible.builtin.command:
+            cmd: >
+              pg_dump -Fc -d {{ db_name }}
+              -f {{ db_backup_dir | default('/opt/backups') }}/{{ repo_name }}_prod_pre-rollback_{{ ansible_date_time.date }}_{{ ansible_date_time.time | replace(':', '-') }}.dump
+          environment:
+            PGUSER: "{{ db_user }}"
+            PGHOST: "{{ db_host }}"
+          when:
+            - app_type != "static"
+            - db_backup_before_migration | default(true)
+          changed_when: true
+
+        - name: "Tag git de sécurité pré-rollback"
+          ansible.builtin.command:
+            cmd: >
+              git tag -f "rollback/prod-pre-rollback-{{ ansible_date_time.date }}-{{ ansible_date_time.time | replace(':', '-') }}"
+            chdir: "{{ app_root }}"
+          changed_when: true
+          failed_when: false
+
+        - name: "  [OK] Etape 0/5 : Sauvegarde BDD et tag créés"
+          ansible.builtin.debug:
+            msg:
+              - "  [OK] Etape 0/5 : Dump BDD dans {{ db_backup_dir | default('/opt/backups') }}"
+              - "  [OK] Tag rollback/prod-pre-rollback-{{ ansible_date_time.date }} créé"
+
+      rescue:
+        - name: "ERREUR sauvegarde BDD — rollback annulé"
+          ansible.builtin.fail:
+            msg: |
+              ERREUR Etape 0/5 : Sauvegarde BDD échouée.
+              Rollback annulé par mesure de sécurité.
+              Vérifiez : pg_dump disponible, PGUSER={{ db_user }}, PGHOST={{ db_host }}
+
+    - name: "--- Etape 1/5 : Fetch depuis Git+Ansible Prod ---"
+      block:
+        - name: "git fetch depuis Git+Ansible Prod (tags inclus)"
+          ansible.builtin.command:
+            cmd: "git fetch origin --prune --tags --force"
+            chdir: "{{ app_root }}"
+          environment:
+            GIT_SSH_COMMAND: "ssh -i {{ git_ssh_key_path }} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+
+        - name: "  [OK] Etape 1/5 : Fetch terminé"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 1/5 : Fetch depuis Git+Ansible Prod terminé"
+
+      rescue:
+        - name: "ERREUR fetch git"
+          ansible.builtin.fail:
+            msg: |
+              ERREUR Etape 1/5 : git fetch échoué sur {{ inventory_hostname }}.
+              Vérifiez la Clé H et que Git+Ansible Prod est accessible.
+
+    - name: "--- Etape 2/5 : Checkout vers la version cible ---"
+      block:
+        - name: "git checkout vers {{ checkout_ref }}"
+          ansible.builtin.command:
+            cmd: "git checkout --force {{ checkout_ref }}"
+            chdir: "{{ app_root }}"
+
+        - name: "Vérifier le commit après checkout"
+          ansible.builtin.command:
+            cmd: git log --oneline -1
+            chdir: "{{ app_root }}"
+          register: commit_after
+          changed_when: false
+
+        - name: "  [OK] Etape 2/5 : Checkout effectué — {{ commit_after.stdout }}"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 2/5 : Checkout vers '{{ rollback_tag }}' — {{ commit_after.stdout }}"
+
+      rescue:
+        - name: "ERREUR checkout"
+          ansible.builtin.fail:
+            msg: |
+              ERREUR Etape 2/5 : Checkout vers '{{ rollback_tag }}' échoué.
+              La sauvegarde BDD de l'Etape 0 est disponible dans {{ db_backup_dir | default('/opt/backups') }}
+
+    - name: "--- Etape 3/5 : Réinstallation des dépendances ---"
+      block:
+        - name: "Composer (PHP)"
+          ansible.builtin.command:
+            cmd: "{{ composer_path }} install {{ composer_args }}"
+            chdir: "{{ app_root }}"
+          environment:
+            HOME: "/home/{{ app_user }}"
+          when: app_type == "php"
+
+        - name: "pip (Python)"
+          ansible.builtin.pip:
+            requirements: "{{ app_root }}/requirements.txt"
+            virtualenv: "{{ python_venv_path | default(app_root + '/.venv') }}"
+          when: app_type == "python"
+
+        - name: "npm (Node.js)"
+          ansible.builtin.command:
+            cmd: "npm ci {{ npm_args | default('--production') }}"
+            chdir: "{{ app_root }}"
+          environment:
+            NODE_ENV: production
+          when: app_type == "nodejs"
+
+        - name: "Maven (Java)"
+          ansible.builtin.command:
+            cmd: "mvn {{ mvn_args | default('-q clean package -DskipTests') }}"
+            chdir: "{{ app_root }}"
+          environment:
+            JAVA_HOME: "{{ java_home | default('/usr/lib/jvm/java-17') }}"
+          when: app_type == "java"
+          changed_when: true
+
+        - name: "go build (Go)"
+          ansible.builtin.command:
+            cmd: "go build {{ go_build_args | default('./...') }}"
+            chdir: "{{ app_root }}"
+          environment:
+            GOPATH: "{{ go_path | default('/opt/go') }}"
+            GOFLAGS: "{{ '-mod=vendor' if go_vendor_mode | default(true) else '' }}"
+          when: app_type == "go"
+          changed_when: true
+
+        - name: "  [OK] Etape 3/5 : Dépendances réinstallées"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 3/5 : Dépendances réinstallées pour la version {{ rollback_tag }}"
+
+      rescue:
+        - name: "ERREUR réinstallation dépendances"
+          ansible.builtin.fail:
+            msg: |
+              ERREUR Etape 3/5 : Réinstallation des dépendances échouée.
+              Restaurez la BDD depuis : {{ db_backup_dir | default('/opt/backups') }}
+
+    - name: "--- Etape 4/5 : Rollback migrations (best-effort) ---"
+      block:
+        - name: "Vérifier la présence d'un script de rollback migrations"
+          ansible.builtin.stat:
+            path: "{{ app_root }}/migrations/rollback.sh"
+          register: rollback_script
+
+        - name: "Rollback des migrations (si script présent)"
+          ansible.builtin.command:
+            cmd: "bash migrations/rollback.sh {{ rollback_tag }}"
+            chdir: "{{ app_root }}"
+          when:
+            - rollback_script.stat.exists
+            - run_migrations | default(true)
+          changed_when: true
+
+        - name: "  [INFO] Pas de script rollback migrations"
+          ansible.builtin.debug:
+            msg: |
+              [INFO] Etape 4/5 : Aucun script migrations/rollback.sh trouvé.
+              Le rollback des migrations est ignoré.
+              En cas de problème BDD, restaurez le dump créé en Etape 0/5 :
+                {{ db_backup_dir | default('/opt/backups') }}/{{ repo_name }}_prod_pre-rollback_*.dump
+          when: not rollback_script.stat.exists
+
+        - name: "  [OK] Etape 4/5 : Migrations rollback terminé"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 4/5 : Rollback migrations effectué"
+          when: rollback_script.stat.exists
+
+    - name: "--- Etape 5/5 : Redémarrage du service + health check ---"
+      block:
+        - name: "Redémarrer le service applicatif"
+          ansible.builtin.systemd:
+            name: "{{ app_service_name }}"
+            state: restarted
+            daemon_reload: true
+          become: true
+          become_user: root
+
+        - name: "Attendre stabilisation"
+          ansible.builtin.pause:
+            seconds: 5
+
+        - name: "Vérifier que le service est actif"
+          ansible.builtin.systemd:
+            name: "{{ app_service_name }}"
+          register: service_status
+          become: true
+          become_user: root
+          failed_when: service_status.status.ActiveState != "active"
+
+        - name: "  [OK] Etape 5/5 : Service actif"
+          ansible.builtin.debug:
+            msg: "  [OK] Etape 5/5 : Service {{ app_service_name }} — ACTIF (version {{ rollback_tag }})"
+
+        - name: "Health check HTTP"
+          ansible.builtin.uri:
+            url: "http://localhost/health"
+            method: GET
+            status_code: 200
+            timeout: 10
+          register: health_check
+          failed_when: false
+          changed_when: false
+
+        - name: "Health check OK"
+          ansible.builtin.debug:
+            msg: "  [OK] Health check HTTP — status {{ health_check.status }}"
+          when: health_check.status | default(0) == 200
+
+        - name: "Health check échoué (avertissement)"
+          ansible.builtin.debug:
+            msg: |
+              [WARN] Health check HTTP status {{ health_check.status | default('N/A') }}.
+              Vérifiez l'application. Le service systemd est actif mais l'endpoint /health répond anormalement.
+          when: health_check.status | default(0) != 200
+
+      rescue:
+        - name: "ERREUR service non démarré après rollback"
+          ansible.builtin.fail:
+            msg: |
+              ERREUR Etape 5/5 : Le service {{ app_service_name }} n'a pas démarré après rollback.
+              Logs : journalctl -u {{ app_service_name }} -n 50
+              Dump BDD disponible : {{ db_backup_dir | default('/opt/backups') }}/{{ repo_name }}_prod_pre-rollback_*.dump
+
+  post_tasks:
+    - name: "Résumé rollback {{ inventory_hostname }}"
+      ansible.builtin.debug:
+        msg:
+          - "  ✓ {{ inventory_hostname }} — ROLLBACK PROD OK"
+          - "  Avant    : {{ commit_before.stdout | default('N/A') }}"
+          - "  Après    : {{ commit_after.stdout | default('N/A') }}"
+          - "  Version  : {{ rollback_tag }}"
+          - "  Service  : {{ app_service_name }} ACTIF"
+
+# ─── Play 3 : Résumé global ────────────────────────────────────────────────────
+- name: "[PROD] Résumé global du rollback"
+  hosts: git_ansible_prod
+  gather_facts: false
+
+  tasks:
+    - name: "Résumé final"
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "  ROLLBACK PRODUCTION TERMINE"
+          - "  Dépôt    : {{ repo_name }}"
+          - "  Version  : {{ rollback_tag }}"
+          - "  Une sauvegarde BDD a été créée dans /opt/backups/ avant le rollback."
+          - "  En cas de problème persistant, restaurez ce dump."
+          - "  Consultez docs/rollback-strategy.md pour le guide complet."
+          - "============================================================"

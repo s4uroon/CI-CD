@@ -1,0 +1,110 @@
+---
+# ─── Tâche : install_deps_nodejs.yml ─────────────────────────────────────────
+# Installation des dépendances pour les projets Node.js.
+# Détecte automatiquement npm (package-lock.json) ou yarn (yarn.lock).
+#
+# Prérequis hors-ligne (RHEL9) :
+#   - Node.js et npm installés (nodejs RPM depuis RHEL AppStream ou offline)
+#   - En mode offline : utiliser --prefer-offline avec cache npm pré-chargé,
+#     OU déployer un registre npm local (Verdaccio).
+#   - Si nodejs_run_build: true, le script "build" doit être défini dans package.json
+#
+# Variables configurables (defaults/main.yml) :
+#   npm_path           : /usr/bin/npm
+#   npm_args           : --production
+#   nodejs_run_build   : false
+# ─────────────────────────────────────────────────────────────────────────────
+
+- name: "Vérifier la présence de package-lock.json (npm)"
+  ansible.builtin.stat:
+    path: "{{ app_root }}/package-lock.json"
+  register: npm_lock
+
+- name: "Vérifier la présence de yarn.lock"
+  ansible.builtin.stat:
+    path: "{{ app_root }}/yarn.lock"
+  register: yarn_lock
+
+- name: "Vérifier la présence de package.json"
+  ansible.builtin.stat:
+    path: "{{ app_root }}/package.json"
+  register: package_json
+
+- name: "ERREUR — aucun fichier package.json trouvé"
+  ansible.builtin.fail:
+    msg: |
+      ERREUR : Aucun package.json trouvé dans {{ app_root }}.
+      Ce fichier est obligatoire pour les projets Node.js.
+  when: not package_json.stat.exists
+
+- name: "Installation npm ci (package-lock.json présent)"
+  ansible.builtin.command:
+    cmd: "{{ npm_path | default('/usr/bin/npm') }} ci {{ npm_args | default('--production') }} --prefer-offline"
+    chdir: "{{ app_root }}"
+  environment:
+    NODE_ENV: "{{ node_env | default('production') }}"
+    HOME: "/home/{{ app_user }}"
+    npm_config_cache: "{{ npm_cache_dir | default('/home/' + app_user + '/.npm') }}"
+  when: npm_lock.stat.exists
+  changed_when: true
+  register: npm_result
+
+- name: "  [OK] npm ci terminé"
+  ansible.builtin.debug:
+    msg: "  [OK] npm ci terminé ({{ npm_args | default('--production') }})"
+  when: npm_lock.stat.exists
+
+- name: "Installation yarn (yarn.lock présent, pas de package-lock)"
+  ansible.builtin.command:
+    cmd: "yarn install --frozen-lockfile --production --prefer-offline"
+    chdir: "{{ app_root }}"
+  environment:
+    NODE_ENV: "{{ node_env | default('production') }}"
+    HOME: "/home/{{ app_user }}"
+  when:
+    - not npm_lock.stat.exists
+    - yarn_lock.stat.exists
+  changed_when: true
+
+- name: "  [OK] yarn install terminé"
+  ansible.builtin.debug:
+    msg: "  [OK] yarn install --frozen-lockfile terminé"
+  when:
+    - not npm_lock.stat.exists
+    - yarn_lock.stat.exists
+
+- name: "Installation npm install (fallback — ni lock npm ni yarn)"
+  ansible.builtin.command:
+    cmd: "{{ npm_path | default('/usr/bin/npm') }} install {{ npm_args | default('--production') }} --prefer-offline"
+    chdir: "{{ app_root }}"
+  environment:
+    NODE_ENV: "{{ node_env | default('production') }}"
+    HOME: "/home/{{ app_user }}"
+  when:
+    - not npm_lock.stat.exists
+    - not yarn_lock.stat.exists
+  changed_when: true
+
+- name: "  [WARN] npm install (fallback — lockfile absent, résolution non déterministe)"
+  ansible.builtin.debug:
+    msg: |
+      [WARN] npm install exécuté sans lockfile (ni package-lock.json ni yarn.lock).
+      Recommandé : committez un lockfile pour des builds reproductibles.
+  when:
+    - not npm_lock.stat.exists
+    - not yarn_lock.stat.exists
+
+- name: "Étape de build (npm run build)"
+  ansible.builtin.command:
+    cmd: "{{ npm_path | default('/usr/bin/npm') }} run build"
+    chdir: "{{ app_root }}"
+  environment:
+    NODE_ENV: "{{ node_env | default('production') }}"
+    HOME: "/home/{{ app_user }}"
+  when: nodejs_run_build | default(false)
+  changed_when: true
+
+- name: "  [OK] npm run build terminé"
+  ansible.builtin.debug:
+    msg: "  [OK] npm run build terminé"
+  when: nodejs_run_build | default(false)

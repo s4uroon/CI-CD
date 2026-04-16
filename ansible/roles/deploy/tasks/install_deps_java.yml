@@ -1,0 +1,100 @@
+---
+# ─── Tâche : install_deps_java.yml ───────────────────────────────────────────
+# Installation des dépendances pour les projets Java.
+# Détecte automatiquement Maven (pom.xml) ou Gradle (gradlew).
+#
+# Prérequis hors-ligne (RHEL9) :
+#   - JDK installé (java-17-openjdk ou java-11-openjdk)
+#   - Maven installé (maven RPM ou binaire dans /opt/maven)
+#   - Pour Gradle : le wrapper gradlew doit être inclus dans le dépôt
+#   - Dépendances Maven pré-chargées dans le dépôt local (~/.m2)
+#   - Dépendances Gradle pré-chargées dans le cache Gradle (~/.gradle)
+#
+# Variables configurables (defaults/main.yml) :
+#   java_home          : /usr/lib/jvm/java-17
+#   mvn_path           : /usr/bin/mvn
+#   mvn_args           : -q clean package -DskipTests
+#   gradle_args        : build -x test
+# ─────────────────────────────────────────────────────────────────────────────
+
+- name: "Vérifier la présence de pom.xml (Maven)"
+  ansible.builtin.stat:
+    path: "{{ app_root }}/pom.xml"
+  register: maven_build
+
+- name: "Vérifier la présence de gradlew (Gradle wrapper)"
+  ansible.builtin.stat:
+    path: "{{ app_root }}/gradlew"
+  register: gradle_wrapper
+
+- name: "Vérifier la présence de build.gradle (Gradle sans wrapper)"
+  ansible.builtin.stat:
+    path: "{{ app_root }}/build.gradle"
+  register: gradle_build
+
+- name: "ERREUR — aucun fichier de build Java trouvé"
+  ansible.builtin.fail:
+    msg: |
+      ERREUR : Aucun fichier de build Java trouvé dans {{ app_root }}.
+      Attendu : pom.xml (Maven) ou gradlew / build.gradle (Gradle).
+  when:
+    - not maven_build.stat.exists
+    - not gradle_wrapper.stat.exists
+    - not gradle_build.stat.exists
+
+- name: "Build Maven (pom.xml détecté)"
+  ansible.builtin.command:
+    cmd: "{{ mvn_path | default('/usr/bin/mvn') }} {{ mvn_args | default('-q clean package -DskipTests') }}"
+    chdir: "{{ app_root }}"
+  environment:
+    JAVA_HOME: "{{ java_home | default('/usr/lib/jvm/java-17') }}"
+    HOME: "/home/{{ app_user }}"
+  when: maven_build.stat.exists
+  changed_when: true
+  register: maven_result
+
+- name: "  [OK] Maven build terminé"
+  ansible.builtin.debug:
+    msg: "  [OK] Maven build terminé ({{ mvn_args | default('-q clean package -DskipTests') }})"
+  when: maven_build.stat.exists
+
+- name: "Build Gradle via wrapper (gradlew détecté)"
+  ansible.builtin.command:
+    cmd: "./gradlew {{ gradle_args | default('build -x test') }}"
+    chdir: "{{ app_root }}"
+  environment:
+    JAVA_HOME: "{{ java_home | default('/usr/lib/jvm/java-17') }}"
+    HOME: "/home/{{ app_user }}"
+    GRADLE_USER_HOME: "{{ gradle_user_home | default('/home/' + app_user + '/.gradle') }}"
+  when:
+    - not maven_build.stat.exists
+    - gradle_wrapper.stat.exists
+  changed_when: true
+
+- name: "  [OK] Gradle wrapper build terminé"
+  ansible.builtin.debug:
+    msg: "  [OK] Gradle wrapper build terminé ({{ gradle_args | default('build -x test') }})"
+  when:
+    - not maven_build.stat.exists
+    - gradle_wrapper.stat.exists
+
+- name: "Build Gradle système (build.gradle sans wrapper)"
+  ansible.builtin.command:
+    cmd: "gradle {{ gradle_args | default('build -x test') }}"
+    chdir: "{{ app_root }}"
+  environment:
+    JAVA_HOME: "{{ java_home | default('/usr/lib/jvm/java-17') }}"
+    HOME: "/home/{{ app_user }}"
+  when:
+    - not maven_build.stat.exists
+    - not gradle_wrapper.stat.exists
+    - gradle_build.stat.exists
+  changed_when: true
+
+- name: "  [OK] Gradle build terminé"
+  ansible.builtin.debug:
+    msg: "  [OK] Gradle build terminé ({{ gradle_args | default('build -x test') }})"
+  when:
+    - not maven_build.stat.exists
+    - not gradle_wrapper.stat.exists
+    - gradle_build.stat.exists

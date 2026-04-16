@@ -1,0 +1,40 @@
+---
+# ─── Tâche : run_migrations_nodejs.yml ───────────────────────────────────────
+# Exécution des migrations de base de données pour les projets Node.js.
+# Utilise la variable nodejs_migration_command si définie.
+#
+# Outils courants :
+#   - Sequelize : npx sequelize-cli db:migrate
+#   - Knex      : npx knex migrate:latest
+#   - Prisma    : npx prisma migrate deploy
+#   - TypeORM   : npm run migration:run
+#
+# Variables configurables :
+#   nodejs_migration_command : (optionnel) commande de migration à exécuter
+#   npm_path                 : /usr/bin/npm
+# ─────────────────────────────────────────────────────────────────────────────
+
+- name: "Exécuter les migrations Node.js"
+  ansible.builtin.command:
+    cmd: "{{ nodejs_migration_command }}"
+    chdir: "{{ app_root }}"
+  environment:
+    NODE_ENV: "{{ node_env | default('production') }}"
+    HOME: "/home/{{ app_user }}"
+  when: nodejs_migration_command is defined
+  changed_when: true
+
+- name: "  [OK] Migration Node.js terminée"
+  ansible.builtin.debug:
+    msg: "  [OK] Migration Node.js terminée ({{ nodejs_migration_command }})"
+  when: nodejs_migration_command is defined
+
+- name: "  [INFO] Aucune migration Node.js configurée"
+  ansible.builtin.debug:
+    msg: |
+      [INFO] La variable nodejs_migration_command n'est pas définie.
+      Migrations Node.js ignorées.
+      Pour activer, définir dans repos/<repo_name>.yml :
+        nodejs_migration_command: "npx sequelize-cli db:migrate"
+        # ou: "npx knex migrate:latest", "npx prisma migrate deploy", etc.
+  when: nodejs_migration_command is not defined

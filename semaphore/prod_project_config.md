@@ -85,7 +85,7 @@ Créer les entrées dans **Key Store** :
 
 ---
 
-## 6. Task Templates — Les 2 boutons Prod
+## 6. Task Templates — Les 3 boutons Prod
 
 ### Bouton 1 — Synchro Git Prod
 
@@ -177,6 +177,63 @@ En cas d'échec sur un serveur, les serveurs suivants ne sont pas traités.
 
 ---
 
+### Bouton 3 — Rollback Prod
+
+| Champ            | Valeur                                              |
+|------------------|-----------------------------------------------------|
+| Name             | `[PROD] 3 — Rollback Prod`                          |
+| Playbook         | `ansible/playbooks/prod/03_rollback_prod.yml`        |
+| Inventory        | `inventory-prod`                                    |
+| Repository       | `ci-cd-playbooks-prod`                              |
+| Environment      | `env-prod-default`                                  |
+| SSH Key          | `ssh-key-E-semaphore-to-git-prod`                   |
+| Description      | Sauvegarde BDD + retour à une version précédente en Prod |
+
+**Survey Variables** :
+
+| Variable       | Titre affiché              | Description                                                              | Requis |
+|----------------|----------------------------|--------------------------------------------------------------------------|--------|
+| `repo_name`    | Nom du dépôt               | Ex: myapp, api-backend                                                   | Oui    |
+| `rollback_tag` | Tag ou commit cible        | Ex: v1.3.0, backup/prod-pre-deploy-2026-04-09-14-30-00, ou hash court   | Oui    |
+
+**Étapes du rollback Prod (5 étapes)** :
+
+```
+Etape 0/5 : Sauvegarde BDD + tag git de sécurité pré-rollback
+  → pg_dump vers /opt/backups/<repo>_prod_pre-rollback_<date>.dump
+  → git tag rollback/prod-pre-rollback-<date>-<heure>
+  (permet d'annuler le rollback lui-même si nécessaire)
+
+Etape 1/5 : Fetch depuis Git+Ansible Prod (tags inclus)
+  → git fetch --prune --tags --force
+
+Etape 2/5 : Checkout vers la version cible
+  → git checkout --force tags/<rollback_tag>
+
+Etape 3/5 : Réinstallation des dépendances
+  → composer install (PHP) ou pip install (Python) ou npm ci (Node.js) etc.
+
+Etape 4/5 : Rollback migrations (best-effort)
+  → bash migrations/rollback.sh <rollback_tag> (si le script existe)
+  → Si absent : avertissement uniquement — le dump BDD de l'Etape 0 est le filet
+
+Etape 5/5 : Redémarrage service + health check
+  → systemctl restart <app_service>
+  → HTTP GET http://localhost/health → 200 OK
+```
+
+> **Important** : Le tag doit exister dans le bare Prod.
+> Si le tag vient de HP (ex: `validated/hp/myapp`), lancez d'abord le **Bouton 1 Prod**
+> pour le transférer depuis HP vers Prod.
+>
+> Pour lister les tags disponibles en Prod :
+> ```bash
+> git -C /opt/git/<repo_name>.git tag -l
+> git -C /opt/git/<repo_name>.git tag -l 'backup/prod-pre-*'
+> ```
+
+---
+
 ## 7. Ordre d'exécution recommandé
 
 ```
@@ -187,6 +244,13 @@ Prérequis : Semaphore HP a exécuté ses 3 boutons (Synchro + Deploy + Valider)
 
 2. [Bouton 2 Prod] Déployer Prod     → survey: repo_name = myapp
    → Résultat : BDD sauvegardée, déploiement rolling sur tous les App Prod
+```
+
+**En cas de problème après déploiement Prod :**
+```
+3. [Bouton 3 Prod] Rollback Prod     → survey: repo_name = myapp, rollback_tag = v1.3.0
+   → Résultat : BDD sauvegardée, application revenue à la version v1.3.0
+   → Le dump BDD pré-rollback est disponible dans /opt/backups/ si nécessaire
 ```
 
 ---
@@ -282,19 +346,33 @@ app_servers_prod:
 
 ## 11. Rollback rapide
 
-En cas de problème après un déploiement Prod, consulter le tag de sauvegarde
-créé automatiquement :
+En cas de problème après un déploiement Prod, utiliser le **Bouton 3 — Rollback Prod**.
 
-```bash
-# Sur Git+Ansible Prod
-git -C /opt/git/myapp.git tag -l 'backup/prod-pre-deploy-*'
-# → backup/prod-pre-deploy-2026-04-09-14-30-00
-```
+**Étapes** :
 
-Pour restaurer :
-1. Sur `git-ansible-prod`, noter le commit du tag backup
-2. Relancer le **Bouton 2 Prod** avec `git_tag=backup/prod-pre-deploy-2026-04-09-14-30-00`
-   dans les Extra Variables (ou modifier temporairement le repo YAML)
-3. Restaurer le dump BDD depuis `/opt/backups/` si nécessaire
+1. Identifier le tag à cibler :
+   ```bash
+   # Tags de backup créés automatiquement avant chaque déploiement
+   git -C /opt/git/myapp.git tag -l 'backup/prod-pre-deploy-*'
+   # → backup/prod-pre-deploy-2026-04-09-14-30-00
+   
+   # Tags sémantiques de version
+   git -C /opt/git/myapp.git tag -l 'v*'
+   # → v1.3.0, v1.2.1, v1.2.0
+   ```
+
+2. Lancer le **Bouton 3 Prod** avec :
+   - `repo_name` = `myapp`
+   - `rollback_tag` = `backup/prod-pre-deploy-2026-04-09-14-30-00`
+
+3. Le playbook effectue automatiquement :
+   - Une sauvegarde BDD pré-rollback (filet de sécurité)
+   - Le checkout vers la version demandée
+   - La réinstallation des dépendances et le restart du service
+
+4. Si la BDD doit également être restaurée (données altérées) :
+   ```bash
+   pg_restore -Fc -d myapp_prod /opt/backups/myapp_prod_pre-rollback_<date>.dump
+   ```
 
 Voir [docs/rollback-strategy.md](../docs/rollback-strategy.md) pour le guide complet.

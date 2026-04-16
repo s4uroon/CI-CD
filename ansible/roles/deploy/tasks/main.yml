@@ -2,6 +2,8 @@
 # ─── Rôle : deploy ────────────────────────────────────────────────────────────
 # Exécute les étapes de déploiement applicatif.
 # Appelé par les playbooks 02, 04 et 05 (deploy HP, deploy Prod, rollback).
+#
+# app_type supportés : php | python | java | nodejs | go
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─── Installation des dépendances ─────────────────────────────────────────────
@@ -14,11 +16,37 @@
   ansible.builtin.include_tasks: install_deps_python.yml
   when: app_type == "python"
 
+- name: Installer les dépendances (Java)
+  ansible.builtin.include_tasks: install_deps_java.yml
+  when: app_type == "java"
+
+- name: Installer les dépendances (Node.js)
+  ansible.builtin.include_tasks: install_deps_nodejs.yml
+  when: app_type == "nodejs"
+
+- name: Installer les dépendances / build (Go)
+  ansible.builtin.include_tasks: install_deps_go.yml
+  when: app_type == "go"
+
 # ─── Migrations de base de données ────────────────────────────────────────────
 
-- name: Exécuter les migrations
+- name: Exécuter les migrations (PHP / Python)
   ansible.builtin.include_tasks: run_migrations.yml
-  when: run_migrations | default(true)
+  when:
+    - run_migrations | default(true)
+    - app_type in ["php", "python"]
+
+- name: Exécuter les migrations (Java)
+  ansible.builtin.include_tasks: run_migrations_java.yml
+  when:
+    - run_migrations | default(true)
+    - app_type == "java"
+
+- name: Exécuter les migrations (Node.js)
+  ansible.builtin.include_tasks: run_migrations_nodejs.yml
+  when:
+    - run_migrations | default(true)
+    - app_type == "nodejs"
 
 # ─── Cache / Assets ────────────────────────────────────────────────────────────
 
