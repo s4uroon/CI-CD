@@ -1,21 +1,22 @@
-# Guide d'installation hors-ligne — Red Hat Enterprise Linux 9
+# Installation hors-ligne RHEL9 — Zone Hors-Prod (HP)
 
-Ce guide décrit comment installer tous les composants du CI/CD sur des serveurs
-RHEL9 sans accès à Internet. Toutes les étapes de téléchargement sont effectuées
-sur une machine connectée, puis les packages sont transférés manuellement.
+> Document dédié à la zone HP. Pour la zone Production, voir [offline-installation-rhel9_prod.md](./offline-installation-rhel9_prod.md).
+
+Ce guide décrit l'installation de tous les composants CI/CD sur les serveurs
+RHEL9 de la zone Hors-Prod sans accès Internet.
 
 ---
 
-## 1. Vue d'ensemble
+## 1. Serveurs cibles de la zone HP
 
-| Composant         | Rôle                          | Serveurs cibles                    |
-|-------------------|-------------------------------|------------------------------------|
-| Git               | Gestion des dépôts            | Tous les serveurs                  |
-| Ansible           | Moteur d'automatisation       | git-ansible-hp, git-ansible-prod   |
-| Ansible Semaphore | Interface web CI/CD           | semaphore-hp, semaphore-prod       |
-| Nginx             | Reverse proxy HTTPS           | semaphore-hp, semaphore-prod       |
-| OpenSSH           | Transferts sécurisés          | Tous les serveurs (déjà présent)   |
-| Python 3          | Dépendance Ansible            | git-ansible-hp, git-ansible-prod   |
+| Composant         | Rôle                          | Serveurs HP cibles                        |
+|-------------------|-------------------------------|-------------------------------------------|
+| Git               | Gestion des dépôts            | git-ansible-hp, app[n]-hp                 |
+| Ansible           | Moteur d'automatisation       | git-ansible-hp                            |
+| Ansible Semaphore | Interface web CI/CD           | semaphore-hp                              |
+| Nginx             | Reverse proxy HTTPS           | semaphore-hp                              |
+| OpenSSH           | Transferts sécurisés          | Tous (déjà présent)                       |
+| Python 3          | Dépendance Ansible            | git-ansible-hp                            |
 
 ---
 
@@ -24,9 +25,8 @@ sur une machine connectée, puis les packages sont transférés manuellement.
 - **Machine connectée** : accès Internet, même architecture (x86_64), idéalement RHEL9 ou
   compatible (Rocky Linux 9, AlmaLinux 9) pour garantir la compatibilité des RPMs
 - **Support de transfert** : clé USB, partage réseau isolé, ou serveur de fichiers intermédiaire
-- **Accès root** sur tous les serveurs cibles
-- **Abonnement RHEL9** sur les serveurs cibles (pour la résolution RPM) OU utilisation
-  des repos offline Red Hat (ISO)
+- **Accès root** sur tous les serveurs cibles HP
+- **Abonnement RHEL9** sur les serveurs cibles (pour la résolution RPM)
 
 ---
 
@@ -49,10 +49,9 @@ dnf download --resolve --destdir=/tmp/offline-packages/rpms \
   python3 python3-pip python3-devel python3-setuptools
 
 # Ansible Core (depuis EPEL ou repo Ansible)
-# Option A : depuis EPEL (recommandé)
 dnf download --resolve --destdir=/tmp/offline-packages/rpms ansible-core
 
-# Nginx (reverse proxy HTTPS)
+# Nginx (reverse proxy HTTPS pour Semaphore HP)
 dnf download --resolve --destdir=/tmp/offline-packages/rpms nginx
 
 # OpenSSL et outils réseau
@@ -67,22 +66,21 @@ dnf download --resolve --destdir=/tmp/offline-packages/rpms \
 > transitives. Testez toujours l'installation sur une machine RHEL9 propre avant le
 > déploiement réel.
 
-### 3.3 Ansible Semaphore (binaire)
+### 3.3 Ansible Semaphore (binaire — pour semaphore-hp)
 
 ```bash
-# Identifier la dernière version stable sur https://github.com/semaphoreui/semaphore/releases
 SEMAPHORE_VERSION="2.10.22"
 
 wget -P /tmp/offline-packages/semaphore \
   "https://github.com/semaphoreui/semaphore/releases/download/v${SEMAPHORE_VERSION}/semaphore_${SEMAPHORE_VERSION}_linux_amd64.tar.gz"
 
-# Vérifier le checksum (disponible sur la page releases)
+# Vérifier le checksum
 wget -P /tmp/offline-packages/semaphore \
   "https://github.com/semaphoreui/semaphore/releases/download/v${SEMAPHORE_VERSION}/semaphore_${SEMAPHORE_VERSION}_checksums.txt"
 sha256sum -c <(grep linux_amd64.tar.gz /tmp/offline-packages/semaphore/semaphore_${SEMAPHORE_VERSION}_checksums.txt)
 ```
 
-### 3.4 Collections Ansible (si nécessaires)
+### 3.4 Collections Ansible (pour git-ansible-hp)
 
 ```bash
 # Collection community.general (mail, modules supplémentaires)
@@ -94,26 +92,26 @@ ansible-galaxy collection download community.postgresql \
   -p /tmp/offline-packages/ansible-collections
 ```
 
-### 3.5 Packages Python supplémentaires (si Ansible via pip)
+### 3.5 Packages Python supplémentaires
 
 ```bash
-# Si ansible-core n'est pas disponible via RPM, ou pour avoir une version plus récente
 pip download ansible-core --dest /tmp/offline-packages/pip
 pip download jinja2 pyyaml cryptography --dest /tmp/offline-packages/pip
 ```
 
 ---
 
-## 4. Transfert vers les serveurs cibles
+## 4. Transfert vers les serveurs HP
 
 ```bash
-# Exemple via SCP (adapter selon votre méthode de transfert)
-# Depuis la machine connectée vers le serveur cible
-
-scp -r /tmp/offline-packages/ deploy@git-ansible-hp.company.com:/tmp/
+# Vers Semaphore HP
 scp -r /tmp/offline-packages/ deploy@semaphore-hp.company.com:/tmp/
-scp -r /tmp/offline-packages/ deploy@git-ansible-prod.company.com:/tmp/
-scp -r /tmp/offline-packages/ deploy@semaphore-prod.company.com:/tmp/
+
+# Vers Git+Ansible HP
+scp -r /tmp/offline-packages/ deploy@git-ansible-hp.company.com:/tmp/
+
+# Vers App Server(s) HP (répéter pour chaque app[n]-hp)
+scp -r /tmp/offline-packages/ deploy@app1-hp.company.com:/tmp/
 
 # Alternative via clé USB (monter la clé et copier)
 # cp -r /tmp/offline-packages/ /media/usb/
@@ -121,37 +119,36 @@ scp -r /tmp/offline-packages/ deploy@semaphore-prod.company.com:/tmp/
 
 ---
 
-## 5. Installation sur les serveurs cibles (en tant que root)
+## 5. Installation sur les serveurs HP (en tant que root)
 
-### 5.1 Packages RPM
+### 5.1 Sur tous les serveurs HP — Packages RPM communs
 
 ```bash
-# Désactiver tous les dépôts réseau et installer uniquement depuis les fichiers locaux
 cd /tmp/offline-packages/rpms
 dnf install --disablerepo="*" *.rpm
 
-# Vérifier les installations
+# Vérifier
 git --version
 python3 --version
-nginx --version
 ```
 
-### 5.2 Ansible (si installé via pip)
+### 5.2 Sur Git+Ansible HP — Ansible
 
 ```bash
+# Via RPM (si ansible-core inclus dans les rpms)
+dnf install --disablerepo="*" ansible-core-*.rpm
+
+# Ou via pip
 pip3 install --no-index --find-links=/tmp/offline-packages/pip ansible-core
 ansible --version
-```
 
-### 5.3 Collections Ansible
-
-```bash
+# Collections Ansible
 ansible-galaxy collection install \
   /tmp/offline-packages/ansible-collections/community-general-*.tar.gz \
   --offline
 ```
 
-### 5.4 Ansible Semaphore
+### 5.3 Sur Semaphore HP — Installation Semaphore
 
 ```bash
 # Extraire le binaire
@@ -160,11 +157,14 @@ tar -xzf /tmp/offline-packages/semaphore/semaphore_*_linux_amd64.tar.gz \
 
 chmod +x /usr/local/bin/semaphore
 semaphore version
+
+# Nginx
+nginx --version
 ```
 
 ---
 
-## 6. Configuration initiale de Semaphore
+## 6. Configuration initiale de Semaphore HP
 
 ### 6.1 Créer l'utilisateur système
 
@@ -174,43 +174,38 @@ mkdir -p /etc/semaphore /var/lib/semaphore
 chown semaphore:semaphore /etc/semaphore /var/lib/semaphore
 ```
 
-### 6.2 Initialiser Semaphore (premier démarrage interactif)
+### 6.2 Initialiser Semaphore HP (premier démarrage interactif)
 
 ```bash
 semaphore setup
 ```
 
 Répondre aux questions :
-- **DB Driver** : `bolt` (BoltDB, base embarquée — recommandé pour simplicité)
+- **DB Driver** : `bolt` (BoltDB embarquée — recommandé pour HP)
 - **DB path** : `/var/lib/semaphore/semaphore.bolt`
-- **Playbook path** : `/home/semaphore` (dossier de travail Ansible)
-- **Public URL** : `https://semaphore-hp.company.com` (ou l'URL HTTPS de votre instance)
+- **Playbook path** : `/home/semaphore`
+- **Public URL** : `https://semaphore-hp.company.com`
 - **Admin login / password** : créer le compte administrateur initial
 
-> **Alternative BDD** : Pour une installation enterprise avec haute disponibilité,
-> utiliser PostgreSQL à la place de BoltDB.
-> Dans ce cas, `dnf install` le RPM postgresql offline et configurer en conséquence.
-
-### 6.3 Fichier d'environnement
-
-Créer `/etc/semaphore/semaphore.env` (voir `docs/ldap-https-configuration.md` pour le contenu complet) :
+### 6.3 Fichier d'environnement HP
 
 ```bash
 touch /etc/semaphore/semaphore.env
 chmod 640 /etc/semaphore/semaphore.env
 chown root:semaphore /etc/semaphore/semaphore.env
 
-# Ajouter au minimum :
 echo "SEMAPHORE_WEB_HOST=https://semaphore-hp.company.com" >> /etc/semaphore/semaphore.env
 ```
 
-### 6.4 Unité systemd
+Voir [ldap-https-configuration_hp.md](./ldap-https-configuration_hp.md) pour le contenu complet.
+
+### 6.4 Unité systemd (Semaphore HP)
 
 Créer `/etc/systemd/system/semaphore.service` :
 
 ```ini
 [Unit]
-Description=Ansible Semaphore
+Description=Ansible Semaphore HP
 Documentation=https://docs.semaphoreui.com
 After=network.target
 
@@ -241,13 +236,12 @@ systemctl status semaphore
 
 ---
 
-## 7. Configuration Nginx (HTTPS)
+## 7. Configuration Nginx HP
 
-Voir le guide complet dans `docs/ldap-https-configuration.md` (section 3).
+Voir le guide complet dans [ldap-https-configuration_hp.md](./ldap-https-configuration_hp.md) (section 3).
 
 ```bash
 # Résumé rapide
-cp /etc/nginx/conf.d/semaphore.conf  # (créer selon le guide LDAP/HTTPS)
 nginx -t
 systemctl enable nginx
 systemctl start nginx
@@ -255,12 +249,12 @@ systemctl start nginx
 
 ---
 
-## 8. Considérations spécifiques RHEL9
+## 8. Considérations spécifiques RHEL9 (zone HP)
 
 ### 8.1 SELinux (enforcing par défaut)
 
 ```bash
-# Pour Nginx → Semaphore (proxy réseau)
+# Pour Nginx → Semaphore HP (proxy réseau)
 setsebool -P httpd_can_network_connect 1
 
 # Restaurer les contextes SELinux du binaire Semaphore
@@ -270,13 +264,13 @@ restorecon -v /usr/local/bin/semaphore
 ausearch -m avc -ts recent | audit2allow -a
 ```
 
-### 8.2 Firewalld
+### 8.2 Firewalld (zone HP)
 
 ```bash
 # Ouvrir SSH (si pas déjà ouvert)
 firewall-cmd --permanent --add-service=ssh
 
-# Ouvrir HTTPS pour l'interface Semaphore
+# Ouvrir HTTPS pour l'interface Semaphore HP
 firewall-cmd --permanent --add-service=https
 
 # Appliquer
@@ -286,100 +280,76 @@ firewall-cmd --list-all
 
 ### 8.3 Vérification des dépendances RPM
 
-Les RPMs RHEL9 peuvent avoir des dépendances sur des bibliothèques système spécifiques.
-Pour s'assurer que toutes les dépendances sont incluses dans le téléchargement :
-
 ```bash
 # Sur la machine connectée, vérifier que le download inclut TOUTES les deps
 dnf download --resolve --destdir=/tmp/test-deps ansible-core
 rpm -qpR /tmp/test-deps/*.rpm | sort -u > /tmp/deps-requises.txt
-# Vérifier manuellement que tout est présent
 ```
 
-### 8.4 Gestion des mises à jour offline
+### 8.4 Mises à jour offline de Semaphore HP
 
-Pour mettre à jour Semaphore :
 1. Télécharger le nouveau binaire sur une machine connectée
-2. Transférer vers le serveur
+2. Transférer vers `semaphore-hp`
 3. `systemctl stop semaphore`
 4. Remplacer le binaire : `cp semaphore_new /usr/local/bin/semaphore`
 5. `systemctl start semaphore`
 
 ---
 
-## 9. Vérification finale
+## 9. Langages supplémentaires sur App Server(s) HP
 
-```bash
-# Vérifier toutes les installations
-git --version          # → git version 2.x.x
-ansible --version      # → ansible [core 2.x.x]
-semaphore version      # → 2.x.x
-nginx -v               # → nginx version: nginx/1.x.x
-
-# Vérifier les services
-systemctl status semaphore
-systemctl status nginx
-
-# Tester l'accès HTTPS
-curl -Ik https://semaphore-hp.company.com
-# Attendu : HTTP/2 200 avec header Strict-Transport-Security
-```
-
----
-
-## 10. Langages supplémentaires (Java, Node.js, Go)
-
-Pour les projets multi-langages, des runtimes supplémentaires doivent être installés
-sur les **serveurs applicatifs** (App HP, App Prod) — pas sur les serveurs Semaphore.
+À installer sur les serveurs `app[n]-hp` selon la stack applicative.
 
 ### Java
 
 ```bash
-# Télécharger (machine connectée)
 dnf download --resolve --destdir=/tmp/offline-packages/rpms java-17-openjdk java-17-openjdk-devel
-
-# Pour Maven
-dnf download --resolve --destdir=/tmp/offline-packages/rpms maven
-
-# Installer (serveurs App)
 dnf install --disablerepo="*" /tmp/offline-packages/rpms/*.rpm
 java -version
-mvn --version
 ```
 
 ### Node.js
 
 ```bash
-# Télécharger (machine connectée)
 dnf download --resolve --destdir=/tmp/offline-packages/rpms nodejs npm
-
-# Installer
 dnf install --disablerepo="*" /tmp/offline-packages/rpms/*.rpm
 node --version
 npm --version
 ```
 
-> **Mode offline npm** : Pour `npm ci --prefer-offline`, le cache npm doit être
-> pré-chargé sur le serveur. Exécuter `npm install` sur une machine connectée pour
-> peupler `~/.npm`, puis transférer ce répertoire vers le serveur cible.
-> Alternative recommandée : déployer **Verdaccio** (registre npm privé, open source)
-> sur un serveur interne pour servir les packages Node.js.
+> **Mode offline npm** : Pour `npm ci --prefer-offline`, transférer le cache npm
+> (`~/.npm`) depuis une machine connectée. Alternative : déployer **Verdaccio**
+> (registre npm privé) sur un serveur interne HP.
 
 ### Go
 
 ```bash
-# Télécharger le tarball Go (machine connectée)
 GO_VERSION="1.22.0"
 wget https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz
-
-# Installer (serveurs App)
 tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz
 echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile.d/go.sh
 source /etc/profile.d/go.sh
 go version
+```
 
-# CRITIQUE pour mode offline : pré-charger le vendor/
-# Sur machine connectée (dans le répertoire du projet Go) :
-go mod vendor
-# Committer le répertoire vendor/ dans le dépôt avant de déployer
+---
+
+## 10. Vérification finale (zone HP)
+
+```bash
+# Sur semaphore-hp
+git --version          # → git version 2.x.x
+semaphore version      # → 2.x.x
+nginx -v               # → nginx version: nginx/1.x.x
+systemctl status semaphore
+systemctl status nginx
+curl -Ik https://semaphore-hp.company.com   # → HTTP/2 200
+
+# Sur git-ansible-hp
+git --version
+ansible --version      # → ansible [core 2.x.x]
+
+# Sur app[n]-hp
+git --version
+# Vérifier le runtime applicatif selon la stack
 ```

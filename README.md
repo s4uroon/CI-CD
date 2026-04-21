@@ -117,13 +117,26 @@ inventory et ses propres clés SSH.
 CI-CD/
 ├── README.md
 ├── docs/
-│   ├── architecture.md                  ← Schémas Mermaid + décisions d'architecture
-│   ├── ldap-https-configuration.md      ← Configuration LDAP et HTTPS
-│   ├── notifications.md                 ← Configuration des notifications Semaphore
-│   ├── offline-installation-rhel9.md    ← Installation hors-ligne sur RHEL 9
-│   ├── rollback-strategy.md             ← Stratégie de rollback par tag Git
-│   ├── ssh-key-management.md            ← Guide complet des 8 paires de clés SSH
-│   └── validation-flag.md               ← Mécanisme flag git HP → Prod
+│   ├── procedure-creation-application.md   ← Procédure standardisée de mise en service d'une nouvelle application
+│   ├── validation-flag.md                  ← Mécanisme flag git HP → Prod (transverse aux deux zones)
+│   │
+│   ├── architecture_hp.md                  ← Architecture zone Hors-Prod (serveurs, clés A-D, boutons 1-4)
+│   ├── architecture_prod.md                ← Architecture zone Production (serveurs, clés E-H, boutons 1-3)
+│   │
+│   ├── ldap-https-configuration_hp.md      ← Configuration LDAP + Nginx HTTPS pour Semaphore HP
+│   ├── ldap-https-configuration_prod.md    ← Configuration LDAP + Nginx HTTPS pour Semaphore PROD
+│   │
+│   ├── notifications_hp.md                 ← Notifications (email/Slack/Teams) pour la zone HP
+│   ├── notifications_prod.md               ← Notifications (email/Slack/Teams) pour la zone PROD
+│   │
+│   ├── offline-installation-rhel9_hp.md    ← Installation hors-ligne RHEL9 — serveurs zone HP
+│   ├── offline-installation-rhel9_prod.md  ← Installation hors-ligne RHEL9 — serveurs zone PROD
+│   │
+│   ├── rollback-strategy_hp.md             ← Stratégie de rollback HP (Bouton 4 HP, sans BDD)
+│   ├── rollback-strategy_prod.md           ← Stratégie de rollback PROD (Bouton 3 PROD, avec sauvegarde BDD)
+│   │
+│   ├── ssh-key-management_hp.md            ← Clés SSH A, B, C, D — génération, distribution, tests HP
+│   └── ssh-key-management_prod.md          ← Clés SSH E, F, G, H — génération, distribution, tests PROD
 ├── ansible/
 │   ├── ansible.cfg
 │   ├── inventory/
@@ -207,7 +220,7 @@ CI-CD/
 
 ## 5. Gestion des clés SSH
 
-Voir le guide détaillé : [docs/ssh-key-management.md](docs/ssh-key-management.md)
+Voir les guides détaillés : [docs/ssh-key-management_hp.md](docs/ssh-key-management_hp.md) · [docs/ssh-key-management_prod.md](docs/ssh-key-management_prod.md)
 
 ### Résumé des 8 paires de clés
 
@@ -293,7 +306,7 @@ Voir les guides détaillés :
 
 ## 9. Flag de validation HP
 
-Voir le guide détaillé : [docs/validation-flag.md](docs/validation-flag.md)
+Voir le guide détaillé : [docs/validation-flag.md](docs/validation-flag.md) (document transverse HP/PROD)
 
 Le **Bouton 3 HP** crée un tag git `validated/hp/<repo_name>` sur le dépôt
 bare HP, signalant que le déploiement HP a été validé par l'équipe.
@@ -312,7 +325,7 @@ BLOQUE : Actions requises sur Semaphore HP :
 
 ## 10. Stratégie de Rollback
 
-Voir le guide détaillé : [docs/rollback-strategy.md](docs/rollback-strategy.md)
+Voir les guides détaillés : [docs/rollback-strategy_hp.md](docs/rollback-strategy_hp.md) · [docs/rollback-strategy_prod.md](docs/rollback-strategy_prod.md)
 
 **Rollback HP (Bouton 4 HP)** :
 - Retourne l'application HP à un tag ou commit précédent (sans sauvegarde BDD)

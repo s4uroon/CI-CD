@@ -1,11 +1,14 @@
-# Stratégie de Rollback
+# Stratégie de Rollback — Zone Production (PROD)
+
+> Document dédié à la zone Production. Pour le rollback HP, voir [rollback-strategy_hp.md](./rollback-strategy_hp.md).
+
+---
 
 ## Principe
 
-Le rollback repose sur les **tags Git sémantiques** (`v1.x.y`) créés au moment
-de chaque déploiement en production. Chaque tag pointe vers un commit précis,
-permettant de revenir à n'importe quelle version antérieure de manière
-**déterministe et reproductible**.
+Le rollback PROD repose sur les **tags Git sémantiques** (`v1.x.y`) et les
+**sauvegardes BDD automatiques** créées avant chaque déploiement. Il s'effectue
+via le **Bouton 3 PROD** dans Semaphore PROD.
 
 ```
 v1.0.0  v1.1.0  v1.2.0  v1.3.0  v1.4.0 (prod actuelle)
@@ -22,68 +25,64 @@ Si `v1.4.0` pose problème → rollback vers `v1.3.0` en un clic.
 ## Convention de nommage des tags
 
 ```
-v<MAJEUR>.<MINEUR>.<PATCH>[-<env>]
+v<MAJEUR>.<MINEUR>.<PATCH>[-<suffixe>]
 
 Exemples :
-  v1.4.2          → tag standard (déployé en prod)
-  v1.4.2-rc1      → release candidate (déployé en hors-prod uniquement)
+  v1.4.2          → tag standard (déployé en PROD)
   v1.4.2-hotfix   → correctif urgent
+
+Tags de sauvegarde automatiques (créés avant chaque déploiement PROD) :
+  backup/prod-pre-deploy-<date>-<heure>
+  Exemple : backup/prod-pre-deploy-2026-04-20-14-30-00
 ```
 
-Le tag est créé **après** validation en hors-prod, **avant** synchro Prod :
+Le tag est créé **après** validation HP, **avant** synchro PROD :
 
 ```bash
-# Après validation hors-prod :
 git tag -a v1.4.2 -m "Release 1.4.2 - Nouvelle fonctionnalité X"
 git push gitlab v1.4.2
 ```
 
 ---
 
-## Les 5 Task Templates dans Semaphore
+## Bouton 3 PROD — Rollback PROD
 
-| # | Template            | Playbook                    | Paramètre requis     |
-|---|---------------------|-----------------------------|----------------------|
-| 1 | Synchro Hors-Prod   | `01_sync_hors_prod.yml`     | branch/tag optionnel |
-| 2 | Déployer Hors-Prod  | `02_deploy_hors_prod.yml`   | —                    |
-| 3 | Synchro Prod        | `03_sync_prod.yml`          | —                    |
-| 4 | Déployer Prod       | `04_deploy_prod.yml`        | —                    |
-| 5 | **Rollback Prod**   | `05_rollback_prod.yml`      | `target_version`     |
+| Template      | Playbook                    | Paramètres Semaphore              |
+|---------------|-----------------------------|-----------------------------------|
+| Rollback PROD | `prod/03_rollback_prod.yml` | `repo_name` + `rollback_tag`     |
 
 ---
 
-## Playbook de rollback : `05_rollback_prod.yml`
+## Playbook de rollback : `prod/03_rollback_prod.yml`
 
 ```yaml
 ---
-# ansible/playbooks/05_rollback_prod.yml
-# Bouton 5 Semaphore : Rollback Production
-# Paramètre obligatoire : target_version (ex: v1.3.0)
+# ansible/playbooks/prod/03_rollback_prod.yml
+# Bouton 3 PROD : Rollback Production
+# Paramètres obligatoires : repo_name, rollback_tag (ex: v1.3.0)
 
 - name: Rollback Production vers une version antérieure
   hosts: prod
   become: true
   become_user: deploy
   vars:
-    # Semaphore passe cette variable via "Extra Variables" dans le template
-    # target_version: "v1.3.0"   # défini dans Semaphore Survey/Variables
     app_dir: "{{ app_root }}"
 
   pre_tasks:
-    - name: Vérifier que target_version est défini
+    - name: Vérifier que rollback_tag est défini
       ansible.builtin.fail:
         msg: >
-          La variable 'target_version' est obligatoire.
-          Exemple : target_version=v1.3.0
-      when: target_version is not defined or target_version == ""
+          La variable 'rollback_tag' est obligatoire.
+          Exemple : rollback_tag=v1.3.0
+      when: rollback_tag is not defined or rollback_tag == ""
 
     - name: Afficher la version cible du rollback
       ansible.builtin.debug:
-        msg: "ROLLBACK vers la version : {{ target_version }}"
+        msg: "ROLLBACK PROD vers la version : {{ rollback_tag }}"
 
     - name: Vérifier que le tag existe dans le dépôt local
       ansible.builtin.command:
-        cmd: git tag -l "{{ target_version }}"
+        cmd: git tag -l "{{ rollback_tag }}"
         chdir: "{{ app_dir }}"
       register: tag_check
       changed_when: false
@@ -91,8 +90,8 @@ git push gitlab v1.4.2
     - name: Échouer si le tag n'existe pas
       ansible.builtin.fail:
         msg: >
-          Le tag '{{ target_version }}' n'existe pas dans le dépôt local.
-          Exécutez d'abord 'Synchro Prod' pour récupérer les tags récents.
+          Le tag '{{ rollback_tag }}' n'existe pas dans le dépôt local.
+          Exécutez d'abord 'Synchro Git Prod' pour récupérer les tags récents.
       when: tag_check.stdout == ""
 
     - name: Enregistrer le commit actuel (pour logs d'audit)
@@ -107,6 +106,13 @@ git push gitlab v1.4.2
         msg: "Commit actuel (avant rollback) : {{ current_commit.stdout }}"
 
   tasks:
+    - name: Sauvegarde BDD avant rollback PROD
+      ansible.builtin.command:
+        cmd: >
+          pg_dump -Fc {{ db_name_prod }} >
+          /opt/backups/{{ repo_name }}_pre-rollback_{{ ansible_date_time.date }}.dump
+      when: run_migrations | default(false)
+
     - name: Stopper le service avant rollback
       ansible.builtin.systemd:
         name: "{{ app_service_name }}"
@@ -116,7 +122,7 @@ git push gitlab v1.4.2
 
     - name: Checkout du tag de rollback
       ansible.builtin.command:
-        cmd: git checkout "tags/{{ target_version }}" --force
+        cmd: git checkout "tags/{{ rollback_tag }}" --force
         chdir: "{{ app_dir }}"
       register: checkout_result
 
@@ -152,9 +158,9 @@ git push gitlab v1.4.2
       ansible.builtin.debug:
         msg:
           - "============================================"
-          - "ROLLBACK EFFECTUE AVEC SUCCES"
+          - "ROLLBACK PROD EFFECTUE AVEC SUCCES"
           - "Version antérieure : {{ current_commit.stdout[:8] }}"
-          - "Version courante   : {{ target_version }}"
+          - "Version courante   : {{ rollback_tag }}"
           - "Serveur            : {{ inventory_hostname }}"
           - "Date               : {{ ansible_date_time.iso8601 }}"
           - "============================================"
@@ -162,36 +168,34 @@ git push gitlab v1.4.2
 
 ---
 
-## Configuration du Template Rollback dans Semaphore
+## Configuration du Template Rollback dans Semaphore PROD
 
-### Création du template
-
-Dans Semaphore → **Task Templates** → **New Template** :
+Dans Semaphore PROD → **Task Templates** → **New Template** :
 
 ```yaml
-Nom          : Rollback Prod
-Playbook     : ansible/playbooks/05_rollback_prod.yml
-Inventaire   : hosts.yml
-Repository   : CI-CD (ce dépôt)
+Nom          : Rollback PROD
+Playbook     : ansible/playbooks/prod/03_rollback_prod.yml
+Inventaire   : ansible/inventory/prod/hosts.yml
+Repository   : CI-CD
 Environnement: env_prod
 
-# Dans l'onglet "Survey Variables" (formulaire interactif) :
 Survey Variables:
-  - name        : target_version
-    title       : "Version cible du rollback (ex: v1.4.2)"
+  - name        : repo_name
+    title       : "Nom du dépôt (ex: myapp)"
+    type        : String
+    required    : true
+  - name        : rollback_tag
+    title       : "Tag cible du rollback (ex: v1.4.2 ou backup/prod-pre-deploy-2026-04-20-14-30-00)"
     description : "Tag Git de la version vers laquelle revenir"
     type        : String
     required    : true
 ```
 
-L'interface Semaphore affichera alors un champ texte à remplir avant
-de lancer le rollback.
-
 ---
 
-## Procédure de rollback pas à pas
+## Procédure de rollback PROD pas à pas
 
-### Identification du problème
+### 1. Identification du problème
 
 ```
 1. Alerte monitoring ou signalement utilisateur
@@ -199,59 +203,63 @@ de lancer le rollback.
 3. Décision de rollback prise par le responsable technique
 ```
 
-### Identification de la version cible
+### 2. Identification de la version cible
 
 ```bash
-# Depuis l'Orchestrateur ou n'importe quel poste avec accès Git :
+# Depuis Git+Ansible PROD ou tout poste avec accès Git
 git log --oneline --decorate --tags --no-walk
 
 # Exemple de sortie :
 # a1b2c3d (tag: v1.4.2) Release 1.4.2
 # e5f6g7h (tag: v1.4.1) Release 1.4.1
 # i9j0k1l (tag: v1.4.0) Release 1.4.0
-# ...
+
+# Tags de sauvegarde automatiques (créés avant chaque déploiement PROD)
+git tag -l 'backup/prod-pre-deploy-*'
 ```
 
-### Exécution du rollback
+### 3. Exécution du rollback PROD
 
 ```
-1. Ouvrir Semaphore
-2. Cliquer sur "Rollback Prod"
-3. Saisir la version cible (ex: v1.3.0)
-4. Confirmer et lancer
-5. Surveiller les logs en temps réel dans Semaphore
-6. Vérifier le service en production
+1. Ouvrir Semaphore PROD → https://semaphore-prod.company.com
+2. Cliquer sur le template "Rollback PROD"
+3. Saisir : repo_name = myapp
+4. Saisir : rollback_tag = v1.3.0 (ou le tag backup)
+5. Confirmer et lancer
+6. Surveiller les logs en temps réel dans Semaphore PROD
+7. Vérifier le service en production
 ```
 
-### Durée estimée
+### 4. Durée estimée
 
 | Étape                    | Durée typique |
 |--------------------------|---------------|
+| Sauvegarde BDD           | 1–5 minutes   |
 | Checkout Git             | < 5 secondes  |
 | Install dépendances      | 1–3 minutes   |
 | Migrations rollback      | Variable       |
 | Redémarrage service      | < 10 secondes |
-| **Total**                | **2–5 min**   |
+| **Total**                | **2–10 min**  |
 
 ---
 
 ## Stratégie de sauvegarde complémentaire
 
-### Snapshot avant déploiement Prod
+### Snapshot avant déploiement PROD
 
-Le playbook `04_deploy_prod.yml` crée automatiquement un tag de sauvegarde
+Le playbook `prod/02_deploy_prod.yml` crée automatiquement un tag de sauvegarde
 avant chaque déploiement :
 
 ```yaml
-- name: Créer un tag de sauvegarde avant déploiement
+- name: Créer un tag de sauvegarde avant déploiement PROD
   ansible.builtin.command:
     cmd: >
-      git tag -f "backup/pre-deploy-{{ ansible_date_time.date }}-{{ ansible_date_time.time | replace(':', '-') }}"
+      git tag -f "backup/prod-pre-deploy-{{ ansible_date_time.date }}-{{ ansible_date_time.time | replace(':', '-') }}"
     chdir: "{{ app_dir }}"
 ```
 
 Cela garantit qu'on peut toujours revenir à l'état exact avant un déploiement,
-même si aucun tag sémantique n'a été créé.
+même si aucun tag sémantique `v1.x.y` n'a été créé manuellement.
 
 ---
 
@@ -263,8 +271,7 @@ même si aucun tag sémantique n'a été créé.
 ### Recommandations
 
 1. **Migrations additive-only** : n'ajouter que des colonnes/tables, ne jamais
-   supprimer lors d'un déploiement initial. La suppression se fait dans une
-   release ultérieure après validation.
+   supprimer lors d'un déploiement initial.
 
 2. **Scripts de rollback dédiés** : chaque migration (`up`) doit avoir son
    équivalent (`down`) :
@@ -274,45 +281,45 @@ même si aucun tag sémantique n'a été créé.
      001_add_users_table.down.sql
    ```
 
-3. **Sauvegardes BDD automatiques** : le playbook `04_deploy_prod.yml` inclut
+3. **Sauvegardes BDD automatiques** : le playbook `prod/02_deploy_prod.yml` inclut
    une tâche de dump avant migration :
    ```yaml
-   - name: Sauvegarde BDD avant migration
+   - name: Sauvegarde BDD avant migration PROD
      ansible.builtin.command:
        cmd: >
-         pg_dump -Fc myapp > /opt/backups/myapp_{{ ansible_date_time.date }}.dump
+         pg_dump -Fc {{ db_name_prod }} > /opt/backups/{{ repo_name }}_{{ ansible_date_time.date }}.dump
    ```
 
 4. **Restauration BDD** : si le rollback applicatif ne suffit pas, restaurer
-   le dump manuellement ou via un playbook dédié `06_restore_db.yml`.
+   le dump manuellement ou via un playbook dédié `04_restore_db.yml`.
 
 ---
 
-## Matrice décisionnelle de rollback
+## Matrice décisionnelle de rollback PROD
 
 ```
-Problème détecté en Prod
+Problème détecté en PROD
         │
         ▼
 Le service démarre-t-il ?
     │           │
    OUI          NON
-    │            └──► Rollback immédiat (Bouton 5)
+    │            └──► Rollback immédiat (Bouton 3 PROD)
     │
     ▼
 Problème de données ou de comportement ?
     │           │
    Données      Comportement
-    │            └──► Rollback applicatif (Bouton 5)
+    │            └──► Rollback applicatif (Bouton 3 PROD)
     │                 puis surveiller
     │
     ▼
 Migration BDD irréversible impliquée ?
     │           │
    OUI          NON
-    │            └──► Rollback applicatif (Bouton 5)
+    │            └──► Rollback applicatif (Bouton 3 PROD)
     │
     ▼
-Restaurer dump BDD + Rollback applicatif
-Informer l'équipe des données perdues potentielles
+Restaurer dump BDD + Rollback applicatif (Bouton 3 PROD)
+Informer l'équipe des données potentiellement perdues
 ```
