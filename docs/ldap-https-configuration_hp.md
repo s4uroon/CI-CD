@@ -1,7 +1,9 @@
-# Configuration LDAP et HTTPS pour Ansible Semaphore
+# Configuration LDAP et HTTPS — Semaphore HP
+
+> Document dédié à la zone Hors-Prod. Pour la zone Production, voir [ldap-https-configuration_prod.md](./ldap-https-configuration_prod.md).
 
 Ce guide couvre la configuration de l'authentification LDAP et de l'accès HTTPS
-pour les instances Semaphore HP et Prod.
+pour l'instance Semaphore HP (`semaphore-hp.company.com`).
 
 ---
 
@@ -12,7 +14,7 @@ Les comptes locaux restent disponibles en parallèle comme fallback.
 
 ### 1.1 Méthode A — Variables d'environnement (recommandée)
 
-Créer le fichier `/etc/semaphore/semaphore.env` sur chaque serveur Semaphore :
+Créer le fichier `/etc/semaphore/semaphore.env` sur **Semaphore HP** :
 
 ```bash
 # ─── LDAP ─────────────────────────────────────────────────────────────────────
@@ -40,6 +42,9 @@ SEMAPHORE_LDAP_MAPPING_DN="dn"
 SEMAPHORE_LDAP_MAPPING_USERNAME="sAMAccountName"
 SEMAPHORE_LDAP_MAPPING_FULLNAME="cn"
 SEMAPHORE_LDAP_MAPPING_EMAIL="mail"
+
+# URL publique de cette instance HP
+SEMAPHORE_WEB_HOST=https://semaphore-hp.company.com
 ```
 
 Protéger le fichier (contient un mot de passe) :
@@ -48,7 +53,7 @@ chmod 640 /etc/semaphore/semaphore.env
 chown root:semaphore /etc/semaphore/semaphore.env
 ```
 
-Référencer ce fichier dans l'unité systemd (voir section 3 de `offline-installation-rhel9.md`) :
+Référencer ce fichier dans l'unité systemd :
 ```ini
 [Service]
 EnvironmentFile=/etc/semaphore/semaphore.env
@@ -58,7 +63,7 @@ EnvironmentFile=/etc/semaphore/semaphore.env
 
 ### 1.2 Méthode B — Fichier config.yml
 
-Si Semaphore est configuré via `config.yml` (mode fichier YAML) :
+Si Semaphore est configuré via `config.yml` :
 
 ```yaml
 ldap:
@@ -92,7 +97,7 @@ SEMAPHORE_LDAP_MAPPING_EMAIL="mail"
 
 ### 1.4 Vérification LDAP
 
-Tester la connexion depuis le serveur Semaphore avant d'activer :
+Tester la connexion depuis **Semaphore HP** avant d'activer :
 
 ```bash
 # Test de connexion LDAP (paquet openldap-clients)
@@ -112,10 +117,9 @@ ldapsearch -H ldaps://ldap.company.com:636 \
 
 ---
 
-## 2. Comptes locaux Semaphore (fallback LDAP)
+## 2. Comptes locaux Semaphore HP (fallback LDAP)
 
-Même avec LDAP activé, des comptes locaux peuvent être créés dans Semaphore.
-Minimum requis : **10 comptes locaux** (administrateurs, opérateurs, auditeurs).
+Même avec LDAP activé, des comptes locaux doivent exister. Minimum requis : **10 comptes**.
 
 ### 2.1 Création via CLI Semaphore
 
@@ -127,13 +131,6 @@ semaphore user add \
   --name "Administrateur Local" \
   --email "admin@company.com" \
   --password "MotDePasseForte123!"
-
-# Créer un compte opérateur (non-admin)
-semaphore user add \
-  --login "operateur1" \
-  --name "Opérateur 1" \
-  --email "operateur1@company.com" \
-  --password "MotDePasseForte456!"
 ```
 
 ### 2.2 Rôles disponibles dans Semaphore
@@ -145,7 +142,7 @@ semaphore user add \
 | `task_runner` | Lancer des tâches uniquement                        |
 | `viewer`      | Consulter les logs et l'historique uniquement       |
 
-### 2.3 Exemple de comptes locaux recommandés (10 minimum)
+### 2.3 Comptes locaux recommandés pour Semaphore HP
 
 ```bash
 # Administrateurs (2)
@@ -160,37 +157,35 @@ semaphore user add --login "manager-hp2" --name "Manager HP 2" --email "manager-
 semaphore user add --login "ops-hp1" --name "Ops HP 1" --email "ops-hp1@company.com" --password "..."
 semaphore user add --login "ops-hp2" --name "Ops HP 2" --email "ops-hp2@company.com" --password "..."
 
-# Opérateurs Prod (2)
-semaphore user add --login "ops-prod1" --name "Ops Prod 1" --email "ops-prod1@company.com" --password "..."
-semaphore user add --login "ops-prod2" --name "Ops Prod 2" --email "ops-prod2@company.com" --password "..."
-
-# Auditeurs (2)
+# Auditeurs (2 — lecture seule)
 semaphore user add --login "audit1" --name "Auditeur 1" --email "audit1@company.com" --password "..."
 semaphore user add --login "audit2" --name "Auditeur 2" --email "audit2@company.com" --password "..."
+
+# Comptes de secours (2)
+semaphore user add --admin --login "break-glass1" --name "Break Glass 1" --email "breakglass1@company.com" --password "..."
+semaphore user add --admin --login "break-glass2" --name "Break Glass 2" --email "breakglass2@company.com" --password "..."
 ```
 
 ### 2.4 Modification du mot de passe d'un compte local
 
 ```bash
 semaphore user change-by-login \
-  --login "operateur1" \
+  --login "ops-hp1" \
   --password "NouveauMotDePasse789!"
 ```
 
 ---
 
-## 3. Configuration HTTPS — Nginx reverse proxy
+## 3. Configuration HTTPS — Nginx reverse proxy (HP)
 
-Semaphore écoute sur `127.0.0.1:3000` par défaut (HTTP). Il est fortement recommandé
-de placer Nginx en reverse proxy HTTPS devant Semaphore.
+Semaphore écoute sur `127.0.0.1:3000` par défaut (HTTP). Nginx assure le reverse proxy HTTPS.
 
 > **Important** : Les headers `Upgrade` et `Connection` sont **obligatoires** pour que
 > le streaming des logs en temps réel (WebSocket) fonctionne dans le navigateur.
-> Sans ces headers, les logs n'apparaissent pas en direct.
 
-### 3.1 Fichier de configuration Nginx
+### 3.1 Fichier de configuration Nginx pour Semaphore HP
 
-Créer `/etc/nginx/conf.d/semaphore.conf` :
+Créer `/etc/nginx/conf.d/semaphore.conf` sur **Semaphore HP** :
 
 ```nginx
 # Redirection HTTP → HTTPS
@@ -221,7 +216,7 @@ server {
     add_header X-Frame-Options SAMEORIGIN always;
     add_header X-Content-Type-Options nosniff always;
 
-    # Proxy vers Semaphore
+    # Proxy vers Semaphore HP
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
@@ -242,9 +237,7 @@ server {
 }
 ```
 
-Pour l'instance Prod, dupliquer avec `server_name semaphore-prod.company.com`.
-
-### 3.2 Certificats TLS
+### 3.2 Certificats TLS pour Semaphore HP
 
 **Option A — Certificat auto-signé (dev/test)** :
 ```bash
@@ -257,7 +250,6 @@ chmod 600 /etc/pki/tls/private/semaphore.key
 
 **Option B — Certificat signé par une CA interne** :
 ```bash
-# Copier le certificat signé par votre CA interne
 cp semaphore.crt /etc/pki/tls/certs/semaphore.crt
 cp semaphore.key /etc/pki/tls/private/semaphore.key
 chmod 600 /etc/pki/tls/private/semaphore.key
@@ -269,21 +261,18 @@ update-ca-trust
 
 ### 3.3 SELinux (RHEL9)
 
-RHEL9 a SELinux en mode enforcing par défaut. Nginx doit être autorisé à
-se connecter à Semaphore sur le port 3000 :
-
 ```bash
-# Autoriser Nginx à se connecter en réseau (proxy vers Semaphore)
+# Autoriser Nginx à se connecter en réseau (proxy vers Semaphore HP)
 setsebool -P httpd_can_network_connect 1
 
-# Vérifier le contexte SELinux du binaire semaphore si installé dans /usr/local/bin
+# Vérifier le contexte SELinux du binaire semaphore
 restorecon -v /usr/local/bin/semaphore
 ```
 
 ### 3.4 Firewalld
 
 ```bash
-# Ouvrir le port HTTPS
+# Ouvrir le port HTTPS pour les accès à Semaphore HP
 firewall-cmd --permanent --add-service=https
 firewall-cmd --reload
 
@@ -291,17 +280,7 @@ firewall-cmd --reload
 firewall-cmd --list-services
 ```
 
-### 3.5 Informer Semaphore de son URL publique
-
-Définir dans `/etc/semaphore/semaphore.env` :
-```bash
-SEMAPHORE_WEB_HOST=https://semaphore-hp.company.com
-```
-
-Cette variable permet à Semaphore de générer des URLs correctes (liens dans les emails,
-webhooks, etc.).
-
-### 3.6 Activer et démarrer Nginx
+### 3.5 Activer et démarrer Nginx
 
 ```bash
 systemctl enable nginx
@@ -311,7 +290,7 @@ systemctl status nginx
 
 ---
 
-## 4. Vérification complète
+## 4. Vérification complète — Semaphore HP
 
 ```bash
 # 1. Vérifier que Nginx démarre sans erreur
